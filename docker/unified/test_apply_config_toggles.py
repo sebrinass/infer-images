@@ -48,12 +48,6 @@ models:
   "my-sd":
     cmd: sd-server --model /models/sd
 
-  # arbitrary name, fastllm isolated venv launcher
-  "my-fastllm":
-    cmd: >
-      /opt/fastllm-venv/bin/ftllm-launch server /models/foo
-      --port ${PORT}
-
   # comment-trap: mentions /opt/vllm-venv in a COMMENT but runs llama-server
   "trap-entry":
     cmd: >
@@ -81,14 +75,11 @@ CASES = [
     ({"INCLUDE_STRATA": "0"}, {"strata-flash-next"}),
     ({"INCLUDE_SD": "0"}, {"my-sd"}),
     ({"INCLUDE_SD": "1"}, set()),
-    ({"INCLUDE_FASTLLM": "0"}, {"my-fastllm"}),
-    ({"INCLUDE_FASTLLM": "1"}, set()),
     # everything off at once
     ({"INCLUDE_LLAMA": "0", "INCLUDE_AUDIOCPP": "0", "INCLUDE_SGLANG": "0",
-      "INCLUDE_VLLM": "0", "INCLUDE_STRATA": "0", "INCLUDE_SD": "0",
-      "INCLUDE_FASTLLM": "0"},
+      "INCLUDE_VLLM": "0", "INCLUDE_STRATA": "0", "INCLUDE_SD": "0"},
      {"llama", "tts", "sglang-agent", "Swift-Qwen3.8-27b", "path-vllm",
-      "strata-flash-next", "my-sd", "my-fastllm", "trap-entry"}),
+      "strata-flash-next", "my-sd", "trap-entry"}),
 ]
 
 fails = 0
@@ -98,8 +89,7 @@ for env_extra, expected in CASES:
         path = fh.name
     env = dict(os.environ)
     for k in ("INCLUDE_LLAMA", "INCLUDE_AUDIOCPP", "INCLUDE_SGLANG",
-              "INCLUDE_VLLM", "INCLUDE_STRATA", "INCLUDE_SD",
-              "INCLUDE_FASTLLM"):
+              "INCLUDE_VLLM", "INCLUDE_STRATA", "INCLUDE_SD"):
         env.pop(k, None)
     env.update(env_extra)
     r = subprocess.run([sys.executable, SCRIPT, path], capture_output=True, text=True, env=env)

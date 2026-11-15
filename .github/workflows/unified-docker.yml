@@ -67,11 +67,6 @@ on:
         type: boolean
         required: false
         default: true
-      include_fastllm:
-        description: "Include FastLLM (isolated CUDA 12 venv, latest ftllm from PyPI)"
-        type: boolean
-        required: false
-        default: true
       include_sd:
         description: "Opt in to stable-diffusion.cpp (off by default)"
         type: boolean
@@ -200,10 +195,6 @@ jobs:
           INCLUDE_VLLM_OMNI: ${{ inputs.include_vllm_omni == true && '1' || '0' }}
           INCLUDE_VLLM_GGUF: ${{ inputs.include_vllm_gguf == true && '1' || '0' }}
           INCLUDE_STRATA: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_strata == true) && '1' || '0' }}
-          # FastLLM is on by default like Strata: unchecking the box on a
-          # manual run turns it off with one click. Same safe non-dispatch form
-          # as INCLUDE_STRATA (an empty `inputs` context must NOT disable it).
-          INCLUDE_FASTLLM: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_fastllm == true) && '1' || '0' }}
           # SGLang is opt-in (vLLM covers the same models): only an explicit
           # `true` on a manual run enables it, push/schedule builds leave it out.
           INCLUDE_SGLANG: ${{ inputs.include_sglang == true && '1' || '0' }}

@@ -11,7 +11,6 @@
 #   vLLM-GGUF-plugin (opt-in, OFF)          -> INCLUDE_VLLM_GGUF
 #   SGLang (isolated venv)                  -> INCLUDE_SGLANG
 #   Strata (Qwen3.8-Flash-Next engine)      -> INCLUDE_STRATA
-#   FastLLM (isolated venv, CUDA 12 wheel)  -> INCLUDE_FASTLLM
 #   stable-diffusion.cpp (opt-in, OFF)      -> INCLUDE_SD
 #
 # The two vLLM add-ons default OFF (opt-in like SD): as of 2026-10-18 no model
@@ -40,8 +39,8 @@
 # Each project has its own install script that handles cloning, building,
 # and installing binaries. Build stages are independent for cache efficiency.
 #
-# Compressed image size with every component: ~12-13 GB. Biggest chunks:
-# vLLM venv ~4.7 GB, SGLang venv ~3.8 GB, Strata ~1 GB, FastLLM ~1-2 GB.
+# Compressed image size with every component: ~11 GB. Biggest chunks:
+# vLLM venv ~4.7 GB, SGLang venv ~3.8 GB, Strata ~1 GB.
 
 # Component toggles (global scope). Every stage that uses a toggle
 # re-declares it below, so a bare `docker buildx build` with no build-args
@@ -63,11 +62,6 @@ ARG INCLUDE_VLLM_OMNI=0
 ARG INCLUDE_VLLM_GGUF=0
 ARG INCLUDE_SGLANG=0
 ARG INCLUDE_STRATA=1
-# FastLLM: on by default (same as Strata), one-click off with --no-fastllm.
-# Its wheel is CUDA 12 based and lives in /opt/fastllm-venv; that venv is
-# deliberately NOT added to the global PATH / LD_LIBRARY_PATH, so enabling or
-# disabling it cannot affect llama.cpp, vLLM, SGLang or Strata.
-ARG INCLUDE_FASTLLM=1
 # SD is opt-in: default 0 keeps the historical image contents (no SD).
 ARG INCLUDE_SD=0
 
@@ -265,41 +259,6 @@ RUN if [ "$INCLUDE_SGLANG" = "1" ]; then \
         echo "INCLUDE_SGLANG=0 -> skipping SGLang install (empty venv placeholder)"; \
     fi
 
-# Install FastLLM (ftllm) in a dedicated venv.
-#
-# ztxz16/fastllm publishes a single prebuilt Linux wheel compiled against
-# CUDA 12.9; its metadata pulls nvidia-*-cu12 runtime wheels. There is no
-# CUDA 13 wheel and building one from source currently breaks multi-GPU
-# (upstream issue #631), so we use the published wheel as-is. The CUDA 12
-# libraries stay inside this venv and are only put on LD_LIBRARY_PATH by the
-# ftllm-launch wrapper when that one model is started.
-#
-# FASTLLM_VERSION is injected by build-image.sh (latest PyPI release at build
-# time). Deliberately NOT pinned, matching the vLLM / SGLang pattern: injecting
-# the resolved string busts the BuildKit cache when upstream ships a release.
-FROM nvidia/cuda:13.3.0-runtime-ubuntu24.04 AS fastllm-build
-
-ENV DEBIAN_FRONTEND=noninteractive
-ARG INCLUDE_FASTLLM=1
-ARG FASTLLM_VERSION=latest
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3.12-dev python3-pip \
-    gcc curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN pip install --break-system-packages uv
-
-COPY install-fastllm.sh /build/
-# INCLUDE_FASTLLM=0 leaves an empty (but valid) venv behind so the runtime
-# COPY --from below is a no-op instead of failing on a missing directory.
-RUN if [ "$INCLUDE_FASTLLM" = "1" ]; then \
-        bash /build/install-fastllm.sh "${FASTLLM_VERSION}"; \
-    else \
-        echo "INCLUDE_FASTLLM=0 -> skipping FastLLM install (empty venv placeholder)"; \
-        mkdir -p /opt/fastllm-venv/bin; \
-    fi
-
 # Build Strata: native C++/CUDA engine (sm_86, Tesla A2 pair) + Python venv.
 # No torch, no CUDA pip wheels - the engine links this image's CUDA libs, so
 # the image delta is ~1 GB (vs ~30 GB for the SGLang venv). Compiled here like
@@ -359,7 +318,6 @@ ARG INCLUDE_VLLM_OMNI=0
 ARG INCLUDE_VLLM_GGUF=0
 ARG INCLUDE_SGLANG=0
 ARG INCLUDE_STRATA=1
-ARG INCLUDE_FASTLLM=1
 ARG INCLUDE_SD=0
 ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_AUDIOCPP=${INCLUDE_AUDIOCPP} \
@@ -370,7 +328,6 @@ ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_VLLM_GGUF=${INCLUDE_VLLM_GGUF} \
     INCLUDE_SGLANG=${INCLUDE_SGLANG} \
     INCLUDE_STRATA=${INCLUDE_STRATA} \
-    INCLUDE_FASTLLM=${INCLUDE_FASTLLM} \
     INCLUDE_SD=${INCLUDE_SD}
 ARG LLAMA_COMMIT_HASH=unknown
 ARG AUDIOCPP_COMMIT_HASH=unknown
@@ -469,13 +426,6 @@ ENV CUDA_HOME="/usr/local/cuda"
 # Copy SGLang venv (empty placeholder venv when INCLUDE_SGLANG=0)
 COPY --from=sglang-build /opt/sglang-venv /opt/sglang-venv
 
-# Copy FastLLM venv (empty placeholder venv when INCLUDE_FASTLLM=0).
-# NOTE: deliberately NOT added to the global PATH or LD_LIBRARY_PATH. The
-# model entry calls /opt/fastllm-venv/bin/ftllm-launch explicitly, and that
-# wrapper scopes the CUDA 12 libraries to the ftllm process only. This keeps
-# every other backend's library resolution byte-for-byte unchanged.
-COPY --from=fastllm-build /opt/fastllm-venv /opt/fastllm-venv
-
 # SGLang's flashinfer JIT-compiles kernels at runtime (e.g. the sampling
 # kernel) and needs CUDA's full curand headers.  /usr/local/cuda/include/
 # ships only a trimmed set.  The pip nvidia packages bundle the complete
@@ -556,11 +506,6 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
     else \
         echo "strata: disabled (INCLUDE_STRATA=0)" >> /versions.txt; \
     fi && \
-    if [ "$INCLUDE_FASTLLM" = "1" ]; then \
-        echo "fastllm: $(/opt/fastllm-venv/bin/python -c 'import importlib.metadata as m; print(m.version("ftllm"))' 2>/dev/null || echo 'installed')" >> /versions.txt; \
-    else \
-        echo "fastllm: disabled (INCLUDE_FASTLLM=0)" >> /versions.txt; \
-    fi && \
     if [ "$INCLUDE_SD" = "1" ]; then \
         echo "stable-diffusion: ${SD_COMMIT_HASH}" >> /versions.txt; \
     else \
@@ -569,7 +514,7 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
     echo "build_timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /versions.txt
 
 RUN mkdir -p /models && chown ${RUN_UID}:${RUN_UID} /models && \
-    chmod -R a+rX /opt/vllm-venv /opt/sglang-venv /opt/fastllm-venv /opt/strata
+    chmod -R a+rX /opt/vllm-venv /opt/sglang-venv /opt/strata
 WORKDIR /models
 USER ${RUN_UID}
 ENTRYPOINT ["llama-swap"]
@@ -588,7 +533,6 @@ ARG INCLUDE_LLAMA=1
 ARG INCLUDE_AUDIOCPP=0
 ARG INCLUDE_LLAMA_SWAP=1
 ARG INCLUDE_VLLM=1
-ARG INCLUDE_FASTLLM=1
 RUN set -e; \
     if [ "$INCLUDE_LLAMA_SWAP" = "1" ]; then \
         command -v llama-swap >/dev/null || { echo "verify: llama-swap MISSING" >&2; exit 1; }; \
@@ -603,9 +547,5 @@ RUN set -e; \
     fi; \
     if [ "$INCLUDE_VLLM" = "1" ]; then \
         command -v vllm >/dev/null || { echo "verify: vllm MISSING" >&2; exit 1; }; \
-    fi; \
-    if [ "$INCLUDE_FASTLLM" = "1" ]; then \
-        test -x /opt/fastllm-venv/bin/ftllm || { echo "verify: ftllm MISSING" >&2; exit 1; }; \
-        test -x /opt/fastllm-venv/bin/ftllm-launch || { echo "verify: ftllm-launch MISSING" >&2; exit 1; }; \
     fi; \
     echo "verify: all required binaries present"

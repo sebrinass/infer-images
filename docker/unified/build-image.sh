@@ -36,11 +36,6 @@ INCLUDE_VLLM_GGUF="${INCLUDE_VLLM_GGUF:-0}"
 # for text/tools/images), and its ~9.5 GB venv crowded the docker disk.
 INCLUDE_SGLANG="${INCLUDE_SGLANG:-0}"
 INCLUDE_STRATA="${INCLUDE_STRATA:-1}"
-# FastLLM is on by default (like Strata) and lives in a fully isolated venv.
-# One-click off: --no-fastllm / INCLUDE_FASTLLM=0. It has its own CUDA 12 pip
-# wheels, so it never touches the global PATH / LD_LIBRARY_PATH and cannot
-# affect llama.cpp, vLLM, SGLang or Strata.
-INCLUDE_FASTLLM="${INCLUDE_FASTLLM:-1}"
 # SD is opt-in (default off): nothing is built unless explicitly requested.
 INCLUDE_SD="${INCLUDE_SD:-0}"
 # The rootless variant (container runs as an unprivileged user) is a separate
@@ -93,17 +88,11 @@ for arg in "$@"; do
         --no-strata)
             INCLUDE_STRATA=0
             ;;
-        --no-fastllm)
-            INCLUDE_FASTLLM=0
-            ;;
-        --fastllm)
-            INCLUDE_FASTLLM=1
-            ;;
         --sd)
             INCLUDE_SD=1
             ;;
         --help|-h)
-            echo "Usage: ./build-image.sh [--cuda] [--no-cache] [--no-llama] [--no-audiocpp] [--audiocpp] [--llamatts] [--no-llama-swap] [--no-vllm] [--sglang] [--no-sglang] [--no-strata] [--fastllm] [--no-fastllm] [--vllm-omni] [--vllm-gguf] [--sd] [--rootless]"
+            echo "Usage: ./build-image.sh [--cuda] [--no-cache] [--no-llama] [--no-audiocpp] [--audiocpp] [--llamatts] [--no-llama-swap] [--no-vllm] [--sglang] [--no-sglang] [--no-strata] [--vllm-omni] [--vllm-gguf] [--sd] [--rootless]"
             echo ""
             echo "Options:"
             echo "  --cuda      Build the unified CUDA image (default)"
@@ -120,8 +109,6 @@ for arg in "$@"; do
             echo "  --sglang         Opt IN to SGLang (~9.5 GB venv; off by default, vLLM covers the same models)"
             echo "  --no-sglang      Skip SGLang (already the default)"
             echo "  --no-strata      Skip Strata engine + venv (~1 GB)"
-            echo "  --no-fastllm     Skip FastLLM (isolated CUDA 12 venv, ~1-2 GB)"
-            echo "  --fastllm        Opt IN to FastLLM (already the default)"
             echo "  --vllm-omni      Opt IN to vLLM-Omni (version auto-aligned to the vLLM line)"
             echo "  --vllm-gguf      Opt IN to vllm-gguf-plugin (GGUF models via vLLM)"
             echo "  --sd             Opt IN to stable-diffusion.cpp (off by default)"
@@ -360,7 +347,6 @@ fi
 VLLM_VERSION=""
 VLLM_OMNI_VERSION=""
 SGLANG_VERSION=""
-FASTLLM_VERSION=""
 if [[ "$INCLUDE_VLLM" != "1" ]]; then
     echo "vllm: skipped (INCLUDE_VLLM=0)"
     VLLM_VERSION="disabled"
@@ -402,23 +388,6 @@ else
     echo "sglang: latest PyPI version: ${SGLANG_VERSION}"
 fi
 
-# FastLLM (PyPI package name: ftllm). Deliberately NOT locked: resolve the
-# latest release on every build and inject the version string as a build-arg
-# so a new upstream release busts the BuildKit layer cache. No constraints
-# file is used - upstream's own CUDA 12 pip dependencies resolve freely.
-if [[ "$INCLUDE_FASTLLM" != "1" ]]; then
-    echo "fastllm: skipped (INCLUDE_FASTLLM=0)"
-    FASTLLM_VERSION="disabled"
-else
-    echo "Resolving FastLLM (ftllm) version from PyPI..."
-    if ! FASTLLM_VERSION=$(curl -fsSL https://pypi.org/pypi/ftllm/json | python3 -c "import json,sys; print(json.load(sys.stdin)['info']['version'])" 2>&1); then
-        echo "ERROR: Failed to resolve ftllm version from PyPI" >&2
-        echo "  curl/python output: ${FASTLLM_VERSION}" >&2
-        exit 1
-    fi
-    echo "fastllm: latest PyPI version: ${FASTLLM_VERSION}"
-fi
-
 echo ""
 echo "=========================================="
 echo "Starting Docker build..."
@@ -438,7 +407,6 @@ for pair in "llama.cpp:${INCLUDE_LLAMA}" \
             "vLLM-GGUF-plugin:${INCLUDE_VLLM_GGUF}" \
             "SGLang:${INCLUDE_SGLANG}" \
             "Strata:${INCLUDE_STRATA}" \
-            "FastLLM:${INCLUDE_FASTLLM}" \
             "stable-diffusion.cpp:${INCLUDE_SD}"; do
     name="${pair%%:*}"
     val="${pair##*:}"
@@ -457,7 +425,6 @@ BUILD_ARGS=(
     --build-arg "VLLM_VERSION=${VLLM_VERSION}"
     --build-arg "VLLM_OMNI_VERSION=${VLLM_OMNI_VERSION}"
     --build-arg "SGLANG_VERSION=${SGLANG_VERSION}"
-    --build-arg "FASTLLM_VERSION=${FASTLLM_VERSION}"
     --build-arg "STRATA_COMMIT_HASH=${STRATA_HASH}"
     --build-arg "INCLUDE_LLAMA=${INCLUDE_LLAMA}"
     --build-arg "INCLUDE_AUDIOCPP=${INCLUDE_AUDIOCPP}"
@@ -468,7 +435,6 @@ BUILD_ARGS=(
     --build-arg "INCLUDE_VLLM_GGUF=${INCLUDE_VLLM_GGUF}"
     --build-arg "INCLUDE_SGLANG=${INCLUDE_SGLANG}"
     --build-arg "INCLUDE_STRATA=${INCLUDE_STRATA}"
-    --build-arg "INCLUDE_FASTLLM=${INCLUDE_FASTLLM}"
     --build-arg "INCLUDE_SD=${INCLUDE_SD}"
     -f "${DOCKERFILE}"
 )
@@ -556,7 +522,6 @@ echo "Running static verification (no GPU required)..."
 if ! docker run --rm --entrypoint bash \
     -e INCLUDE_VLLM="$INCLUDE_VLLM" -e INCLUDE_VLLM_OMNI="$INCLUDE_VLLM_OMNI" -e INCLUDE_VLLM_GGUF="$INCLUDE_VLLM_GGUF" \
     -e INCLUDE_SGLANG="$INCLUDE_SGLANG" -e INCLUDE_STRATA="$INCLUDE_STRATA" \
-    -e INCLUDE_FASTLLM="$INCLUDE_FASTLLM" \
     "${DOCKER_IMAGE_TAG}" -c '
     set -e
     echo "--- nvcc ---"
@@ -623,16 +588,6 @@ if ! docker run --rm --entrypoint bash \
         /opt/strata/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL" && echo "strata venv ok"
     else
         echo "strata: disabled (INCLUDE_STRATA=0)"
-    fi
-    echo "--- fastllm (isolated venv, CUDA 12 wheel) ---"
-    if [ "$INCLUDE_FASTLLM" = "1" ]; then
-        /opt/fastllm-venv/bin/pip show ftllm | head -2
-        test -x /opt/fastllm-venv/bin/ftllm
-        test -x /opt/fastllm-venv/bin/ftllm-launch
-        echo "ftllm binary + launcher present"
-        echo "nvidia cu12 lib dirs: $(ls -d /opt/fastllm-venv/lib/python3.12/site-packages/nvidia/*/lib 2>/dev/null | wc -l)"
-    else
-        echo "fastllm: disabled (INCLUDE_FASTLLM=0)"
     fi
     echo "--- libvulkan_intel.so linked deps ---"
     if ldd /usr/lib/x86_64-linux-gnu/libvulkan_intel.so | grep -qi "not found"; then

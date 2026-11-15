@@ -7,7 +7,7 @@ build.
     docker pull ghcr.io/sebrinass/infer-images:latest
 
 The image carries CUDA and Vulkan backends, llama.cpp, llama-swap, vLLM,
-Strata, SGLang, audio.cpp and FastLLM. Individual components are toggled with
+Strata, SGLang and audio.cpp. Individual components are toggled with
 `INCLUDE_*` build args - see `docker/unified/README.md`.
 
 Builds run on pushes to `docker/unified/**` or the workflow, every 3 days, and

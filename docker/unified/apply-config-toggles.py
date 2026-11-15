@@ -7,8 +7,7 @@ name-based: the entry key can be anything ("Swift-Qwen3.8-27b", ...), but the
 cmd line always references the engine's install path / binary:
 
     llama-server / audiocpp_server|audiocpp_cli / /opt/sglang-venv /
-    /opt/vllm-venv (or `vllm serve`) / /opt/strata / /opt/fastllm-venv /
-    sd-server|sd-cli
+    /opt/vllm-venv (or `vllm serve`) / /opt/strata / sd-server|sd-cli
 
 Entry-name fallbacks (legacy config.example.yaml keys) are kept so older
 configs behave identically:
@@ -37,7 +36,6 @@ CONTENT_RULES = [
     ("/opt/vllm-venv", "INCLUDE_VLLM"),
     ("vllm serve", "INCLUDE_VLLM"),
     ("/opt/strata", "INCLUDE_STRATA"),
-    ("/opt/fastllm-venv", "INCLUDE_FASTLLM"),
     ("sd-server", "INCLUDE_SD"),
     ("sd-cli", "INCLUDE_SD"),
 ]
