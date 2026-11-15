@@ -11,6 +11,7 @@
 #   vLLM-GGUF-plugin (opt-in, OFF)          -> INCLUDE_VLLM_GGUF
 #   SGLang (isolated venv)                  -> INCLUDE_SGLANG
 #   Strata (Qwen3.8-Flash-Next engine)      -> INCLUDE_STRATA
+#   Edge0 (latent-MoE engine, 145B/120B)     -> INCLUDE_EDGE0
 #   stable-diffusion.cpp (opt-in, OFF)      -> INCLUDE_SD
 #
 # The two vLLM add-ons default OFF (opt-in like SD): as of 2026-10-18 no model
@@ -62,6 +63,10 @@ ARG INCLUDE_VLLM_OMNI=0
 ARG INCLUDE_VLLM_GGUF=0
 ARG INCLUDE_SGLANG=0
 ARG INCLUDE_STRATA=1
+# Edge0 (edge0-strata engine + Python server) ships in the default set: it is
+# a separate path from /opt/strata (a fork with latent-MoE kernels), so the two
+# engines coexist and either can be dropped with --no-strata / --no-edge0.
+ARG INCLUDE_EDGE0=1
 # SD is opt-in: default 0 keeps the historical image contents (no SD).
 ARG INCLUDE_SD=0
 
@@ -282,6 +287,32 @@ RUN if [ "$INCLUDE_STRATA" = "1" ]; then \
         mkdir -p /install/strata/.venv/bin; \
     fi
 
+# Build Edge0: edge0-strata, the latent-MoE fork of Strata used by the Edge0
+# 145B / 120B packs, plus its Python server environment (~1 GB). Installed to
+# /opt/edge0 so it never shares a path with upstream Strata (/opt/strata).
+# The 40-100 GB model packs are NOT in the image; they are mounted at runtime.
+FROM builder-base AS edge0-build
+ARG EDGE0_COMMIT_HASH=main
+ARG INCLUDE_EDGE0=1
+ARG EDGE0_BUILD_VISION=1
+COPY install-edge0.sh /build/
+# INCLUDE_EDGE0=0 skips the apt deps + the whole build and only creates the
+# placeholder path the runtime COPY needs.
+# ccache is shared with the llama.cpp / Strata stages: the ggml-cuda objects are
+# the same source and flags, so the second engine reuses them instead of
+# recompiling every kernel.
+RUN --mount=type=cache,id=ccache,target=/ccache \
+    if [ "$INCLUDE_EDGE0" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            python3.12-venv ninja-build \
+            && rm -rf /var/lib/apt/lists/* \
+            && EDGE0_BUILD_VISION="${EDGE0_BUILD_VISION}" \
+               bash /build/install-edge0.sh "${EDGE0_COMMIT_HASH}"; \
+    else \
+        echo "INCLUDE_EDGE0=0 -> skipping Edge0 build"; \
+        mkdir -p /opt/edge0/edge0-strata/build; \
+    fi
+
 # Build stable-diffusion.cpp (opt-in via INCLUDE_SD=1, default off).
 # Same recipe as install-sd.sh: CUDA build, binaries to /install/bin, shared
 # libs to /install/lib (runtime needs ldconfig, done in the strata RUN below).
@@ -318,6 +349,7 @@ ARG INCLUDE_VLLM_OMNI=0
 ARG INCLUDE_VLLM_GGUF=0
 ARG INCLUDE_SGLANG=0
 ARG INCLUDE_STRATA=1
+ARG INCLUDE_EDGE0=1
 ARG INCLUDE_SD=0
 ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_AUDIOCPP=${INCLUDE_AUDIOCPP} \
@@ -328,10 +360,12 @@ ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_VLLM_GGUF=${INCLUDE_VLLM_GGUF} \
     INCLUDE_SGLANG=${INCLUDE_SGLANG} \
     INCLUDE_STRATA=${INCLUDE_STRATA} \
+    INCLUDE_EDGE0=${INCLUDE_EDGE0} \
     INCLUDE_SD=${INCLUDE_SD}
 ARG LLAMA_COMMIT_HASH=unknown
 ARG AUDIOCPP_COMMIT_HASH=unknown
 ARG STRATA_COMMIT_HASH=v0.1.43.1
+ARG EDGE0_COMMIT_HASH=main
 ARG SD_COMMIT_HASH=master
 ARG RUN_UID=0
 
@@ -375,7 +409,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /tmp/cuda-keyring.deb \
     && apt-get update \
     && apt-get install -y --no-install-recommends cuda-nvcc-13-3 cuda-driver-dev-13-3 cuda-cudart-12-8 \
-    && if [ "$INCLUDE_STRATA" = "1" ]; then \
+    && if [ "$INCLUDE_STRATA" = "1" ] || [ "$INCLUDE_EDGE0" = "1" ]; then \
            apt-get install -y --no-install-recommends libatomic1; \
        fi \
     && rm -rf /var/lib/apt/lists/*
@@ -452,12 +486,19 @@ RUN mkdir -p /usr/local/cuda/include && \
 COPY --from=strata-build /install/strata /opt/strata
 COPY strata-first-setup.sh /opt/strata/first-setup.sh
 
+# Copy Edge0 (edge0-strata engine + server venv + model templates) and its
+# launcher. The launcher fills the template's ${...} placeholders and starts
+# serve/server.py; it exists because edge0-infer (the C++ front-end) accepts
+# only one GPU and this box runs two.
+COPY --from=edge0-build /opt/edge0 /opt/edge0
+COPY edge0-run /opt/edge0/run
+
 # Copy stable-diffusion.cpp binaries + shared libs (only when INCLUDE_SD=1;
 # otherwise both source dirs are empty placeholders and these are no-ops).
 COPY --from=sd-build /install/bin/ /usr/local/bin/
 COPY --from=sd-build /install/lib/ /usr/local/lib/
 
-RUN chmod +x /opt/strata/first-setup.sh && ldconfig
+RUN chmod +x /opt/strata/first-setup.sh /opt/edge0/run && ldconfig
 ENV PATH="/opt/strata/.venv/bin:${PATH}"
 
 # Bake the default config, then comment out the entries whose component was
@@ -506,6 +547,11 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
     else \
         echo "strata: disabled (INCLUDE_STRATA=0)" >> /versions.txt; \
     fi && \
+    if [ "$INCLUDE_EDGE0" = "1" ]; then \
+        echo "edge0: ${EDGE0_COMMIT_HASH} (engine arch ${CMAKE_CUDA_ARCHITECTURES:-86})" >> /versions.txt; \
+    else \
+        echo "edge0: disabled (INCLUDE_EDGE0=0)" >> /versions.txt; \
+    fi && \
     if [ "$INCLUDE_SD" = "1" ]; then \
         echo "stable-diffusion: ${SD_COMMIT_HASH}" >> /versions.txt; \
     else \
@@ -514,7 +560,7 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
     echo "build_timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /versions.txt
 
 RUN mkdir -p /models && chown ${RUN_UID}:${RUN_UID} /models && \
-    chmod -R a+rX /opt/vllm-venv /opt/sglang-venv /opt/strata
+    chmod -R a+rX /opt/vllm-venv /opt/sglang-venv /opt/strata /opt/edge0
 WORKDIR /models
 USER ${RUN_UID}
 ENTRYPOINT ["llama-swap"]
@@ -533,6 +579,7 @@ ARG INCLUDE_LLAMA=1
 ARG INCLUDE_AUDIOCPP=0
 ARG INCLUDE_LLAMA_SWAP=1
 ARG INCLUDE_VLLM=1
+ARG INCLUDE_EDGE0=1
 RUN set -e; \
     if [ "$INCLUDE_LLAMA_SWAP" = "1" ]; then \
         command -v llama-swap >/dev/null || { echo "verify: llama-swap MISSING" >&2; exit 1; }; \
@@ -547,5 +594,11 @@ RUN set -e; \
     fi; \
     if [ "$INCLUDE_VLLM" = "1" ]; then \
         command -v vllm >/dev/null || { echo "verify: vllm MISSING" >&2; exit 1; }; \
+    fi; \
+    if [ "$INCLUDE_EDGE0" = "1" ]; then \
+        test -x /opt/edge0/edge0-strata/build/strata || { echo "verify: edge0 engine MISSING" >&2; exit 1; }; \
+        test -x /opt/edge0/run || { echo "verify: edge0 launcher MISSING" >&2; exit 1; }; \
+        /opt/edge0/edge0-strata/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL, psutil" \
+            || { echo "verify: edge0 venv BROKEN" >&2; exit 1; }; \
     fi; \
     echo "verify: all required binaries present"

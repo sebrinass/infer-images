@@ -27,3 +27,23 @@ models:
       --model-path Qwen/Qwen3-7B-Instruct
       --port ${PORT}
       --kv-cache-dtype fp8_e4m3
+
+  # Edge0 145B / 120B (latent-MoE, derived from Qwen3.8-Flash-Next). The packs
+  # stay on the host - each is 40-100 GB - and are mounted read-only, e.g.
+  #   -v /mnt/user/appdata/edge0/Edge0-120B-q3k:/models/Edge0-120B-q3k:ro
+  # The launcher fills the engine template's placeholders and starts the
+  # Python server on ${PORT}; it is used instead of edge0-infer because that
+  # front-end accepts only one GPU. Both cards:
+  #   env: ["EDGE0_GPU=0,1", "EDGE0_EXTRA_ARGS=--expert-cache-device1 auto"]
+  # The 48 GiB PLE table is read straight from disk (ple-io=direct), so it must
+  # sit on NVMe, never on the spinning array.
+  "Edge0-120b":
+    checkEndpoint: /health
+    ttl: 1800
+    cmd: /opt/edge0/run /models/Edge0-120B-q3k
+
+  "Edge0-145b":
+    checkEndpoint: /health
+    ttl: 1800
+    cmd: /opt/edge0/run /models/Edge0-145B-q3k
+

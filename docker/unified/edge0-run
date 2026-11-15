@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Launch an Edge0 model (145B / 120B) behind llama-swap.
+
+edge0-infer (the C++ front-end in the Edge0 repo) fills the ${...} placeholders
+of the engine templates and starts the Python server, but it only exposes ONE
+card: its --device takes a single GPU and it rejects a second one. This box has
+two A2s and wants the second one as an expert-cache tier, so the front-end is
+left out of the image and this script does the same two things itself:
+
+  edge0-run /models/Edge0-120B-q3k      ->  serve/server.py on $PORT
+
+Environment (all optional):
+  PORT               port to listen on (llama-swap sets it; default 8000)
+  EDGE0_MODEL        model folder, if not given as the first argument
+  EDGE0_GPU          cards for the engine, e.g. "0" (default) or "0,1"
+  EDGE0_CONTEXT      --max-context override (default: the template's 131072)
+  EDGE0_DU_FMT       4 or 8: D/U projection file (default 8 for 145B, 4 for 120B)
+  EDGE0_PLE_IO       direct | mmap | ram (default direct: the 48 GiB PLE table
+                     is read straight from disk and never enters memory)
+  EDGE0_EXTRA_ARGS   extra engine words, e.g. "--expert-cache-device1 auto"
+  EDGE0_TEMPLATE     engine template JSON (default: edge0-145b.json / -120b.json)
+  EDGE0_HOST         bind address passed to the server (default: its own)
+  EDGE0_STRATA_DIR   install root (default /opt/edge0/edge0-strata)
+
+  --print-config     write the generated config and print it, do not start
+  --check            validate the template + placeholder path, do not start
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import shlex
+import sys
+
+STRATA_DIR = pathlib.Path(os.environ.get("EDGE0_STRATA_DIR", "/opt/edge0/edge0-strata"))
+TEMPLATE_DIR = STRATA_DIR / "edge0" / "models"
+VENV_PY = STRATA_DIR / ".venv" / "bin" / "python"
+ENGINE = STRATA_DIR / "build" / "strata"
+PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
+
+
+def die(msg: str) -> "NoReturn":  # noqa: F821 - annotation only
+    print(f"edge0-run: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def pick_model_size(model_dir: pathlib.Path) -> str:
+    """145b / 120b from model.json (authoritative) or the folder name."""
+    name = ""
+    mj = model_dir / "model.json"
+    if mj.is_file():
+        try:
+            name = str(json.loads(mj.read_text())).lower()
+        except Exception:
+            name = ""
+    hay = name + " " + model_dir.name.lower()
+    if "145b" in hay:
+        return "145b"
+    if "120b" in hay:
+        return "120b"
+    die(f"cannot tell 145B from 120B: {model_dir} (set EDGE0_TEMPLATE)")
+
+
+def subst(node, values: dict):
+    if isinstance(node, str):
+        return PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), node)
+    if isinstance(node, list):
+        return [subst(v, values) for v in node]
+    if isinstance(node, dict):
+        return {k: subst(v, values) for k, v in node.items()}
+    return node
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    print_only = "--print-config" in args
+    check_only = "--check" in args
+    args = [a for a in args if not a.startswith("--")]
+
+    model_dir = pathlib.Path(args[0] if args else os.environ.get("EDGE0_MODEL", ""))
+    if not str(model_dir):
+        die("usage: edge0-run <model folder>  (or set EDGE0_MODEL)")
+
+    template_env = os.environ.get("EDGE0_TEMPLATE")
+    if template_env:
+        template = pathlib.Path(template_env)
+        size = "145b" if "145b" in template.name.lower() else "120b"
+    else:
+        size = pick_model_size(model_dir)
+        template = TEMPLATE_DIR / f"edge0-{size}.json"
+    if not template.is_file():
+        die(f"template missing: {template}")
+    try:
+        cfg = json.loads(template.read_text())
+    except Exception as exc:
+        die(f"template is not valid JSON ({template}): {exc}")
+
+    if not check_only and not model_dir.is_dir():
+        die(f"model folder missing: {model_dir}")
+
+    du_fmt = os.environ.get("EDGE0_DU_FMT") or ("8" if size == "145b" else "4")
+    model_abs = str(model_dir.resolve())
+    values = {
+        "STRATA_DIR": str(STRATA_DIR),
+        "MODEL_DIR": model_abs,
+        "EXE_SUFFIX": "",
+        "CUDA_LIB_DIR": os.environ.get("EDGE0_CUDA_LIB_DIR", "/usr/local/cuda/lib64"),
+        "PLE_IO": os.environ.get("EDGE0_PLE_IO", "direct"),
+        "DU_FMT": du_fmt,
+        "DU_FILE": f"{model_abs}/latent_dense_q{du_fmt}.bin",
+        "LAT_FUSED_Q3K": os.environ.get("EDGE0_LAT_FUSED_Q3K", "0"),
+    }
+    cfg = subst(cfg, values)
+
+    # cards
+    gpus = [int(g) for g in os.environ.get("EDGE0_GPU", "0").replace(" ", "").split(",") if g != ""]
+    cfg["gpu"] = gpus
+
+    # context length lives in the args list
+    ctx = os.environ.get("EDGE0_CONTEXT")
+    if ctx:
+        argv = cfg.get("args", [])
+        if "--max-context" in argv:
+            argv[argv.index("--max-context") + 1] = str(ctx)
+        else:
+            argv += ["--max-context", str(ctx)]
+        cfg["args"] = argv
+
+    extra = os.environ.get("EDGE0_EXTRA_ARGS")
+    if extra:
+        cfg["args"] = cfg.get("args", []) + shlex.split(extra)
+
+    out = pathlib.Path("/tmp") / f"edge0-{size}-{os.environ.get('PORT', '8000')}.json"
+    out.write_text(json.dumps(cfg, indent=1) + "\n")
+
+    if print_only or check_only:
+        print(f"edge0-run: {size} config -> {out}")
+        print(f"edge0-run: engine {'ok' if os.access(ENGINE, os.X_OK) else 'MISSING'} ({ENGINE})")
+        if print_only:
+            print(out.read_text())
+        return 0
+
+    if not os.access(ENGINE, os.X_OK):
+        die(f"engine missing: {ENGINE}")
+    if not VENV_PY.is_file():
+        die(f"python environment missing: {VENV_PY}")
+
+    port = os.environ.get("PORT", "8000")
+    cmd = [str(VENV_PY), "serve/server.py", "--engine", "strata",
+           "--config", str(out), "--port", str(port)]
+    if os.environ.get("EDGE0_HOST"):
+        cmd += ["--host", os.environ["EDGE0_HOST"]]
+    print(f"edge0-run: {size} on gpu {gpus}, port {port}, config {out}", flush=True)
+    os.chdir(STRATA_DIR)
+    os.execv(str(VENV_PY), cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

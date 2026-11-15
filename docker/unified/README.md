@@ -11,6 +11,9 @@ unless you ask for it:
 - vLLM for OpenAI-compatible high-throughput serving — `--no-vllm` (~4.7 GB)
 - SGLang (isolated venv, opt-in: vLLM covers the same models) — `--sglang` / `--no-sglang` (~9.5 GB)
 - Strata (Qwen3.8-Flash-Next engine) — `--no-strata` (~1 GB)
+- Edge0 145B / 120B latent-MoE engine (`edge0-strata`, installed to
+  `/opt/edge0`, separate from `/opt/strata`) — `--no-edge0` (~1 GB). Model
+  packs are host mounts, not image content; launch with `/opt/edge0/run <pack>`.
 - the llama-swap binary itself (the image entrypoint) — `--no-llama-swap`
 - stable-diffusion.cpp (off by default, opt in with `--sd`)
 - the rootless variant, a second image that runs as an unprivileged user

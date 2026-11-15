@@ -36,6 +36,9 @@ INCLUDE_VLLM_GGUF="${INCLUDE_VLLM_GGUF:-0}"
 # for text/tools/images), and its ~9.5 GB venv crowded the docker disk.
 INCLUDE_SGLANG="${INCLUDE_SGLANG:-0}"
 INCLUDE_STRATA="${INCLUDE_STRATA:-1}"
+# Edge0 (edge0-strata, the latent-MoE fork used by the 145B / 120B packs).
+# Separate install path from Strata; both ship by default, either can go.
+INCLUDE_EDGE0="${INCLUDE_EDGE0:-1}"
 # SD is opt-in (default off): nothing is built unless explicitly requested.
 INCLUDE_SD="${INCLUDE_SD:-0}"
 # The rootless variant (container runs as an unprivileged user) is a separate
@@ -88,11 +91,17 @@ for arg in "$@"; do
         --no-strata)
             INCLUDE_STRATA=0
             ;;
+        --no-edge0)
+            INCLUDE_EDGE0=0
+            ;;
+        --edge0)
+            INCLUDE_EDGE0=1
+            ;;
         --sd)
             INCLUDE_SD=1
             ;;
         --help|-h)
-            echo "Usage: ./build-image.sh [--cuda] [--no-cache] [--no-llama] [--no-audiocpp] [--audiocpp] [--llamatts] [--no-llama-swap] [--no-vllm] [--sglang] [--no-sglang] [--no-strata] [--vllm-omni] [--vllm-gguf] [--sd] [--rootless]"
+            echo "Usage: ./build-image.sh [--cuda] [--no-cache] [--no-llama] [--no-audiocpp] [--audiocpp] [--llamatts] [--no-llama-swap] [--no-vllm] [--sglang] [--no-sglang] [--no-strata] [--edge0] [--no-edge0] [--vllm-omni] [--vllm-gguf] [--sd] [--rootless]"
             echo ""
             echo "Options:"
             echo "  --cuda      Build the unified CUDA image (default)"
@@ -109,6 +118,8 @@ for arg in "$@"; do
             echo "  --sglang         Opt IN to SGLang (~9.5 GB venv; off by default, vLLM covers the same models)"
             echo "  --no-sglang      Skip SGLang (already the default)"
             echo "  --no-strata      Skip Strata engine + venv (~1 GB)"
+            echo "  --edge0          Opt IN to Edge0 145B/120B engine (~1 GB; on by default)"
+            echo "  --no-edge0       Skip the Edge0 engine + venv (~1 GB)"
             echo "  --vllm-omni      Opt IN to vLLM-Omni (version auto-aligned to the vLLM line)"
             echo "  --vllm-gguf      Opt IN to vllm-gguf-plugin (GGUF models via vLLM)"
             echo "  --sd             Opt IN to stable-diffusion.cpp (off by default)"
@@ -118,6 +129,7 @@ for arg in "$@"; do
             echo "  DOCKER_IMAGE_TAG     Set custom image tag (default: infer-images:latest)"
             echo "  LLAMA_REF            Pin llama.cpp to a commit, tag, or branch"
             echo "  AUDIOCPP_REF         Pin audio.cpp to a commit, tag, or branch"
+            echo "  EDGE0_REF            Pin Edge0 to a commit or tag (default: main HEAD)"
             echo "  LS_VERSION           Override llama-swap version (e.g., '170' or 'latest')"
             echo "  VLLM_OMNI_REF        Pin vLLM-Omni explicitly (default: auto-aligned to VLLM_VERSION)"
             echo "  INCLUDE_VLLM_OMNI=1  Same as --vllm-omni (likewise INCLUDE_VLLM_GGUF)"
@@ -337,6 +349,26 @@ else
     echo "strata: ${STRATA_REF} -> ${STRATA_HASH}"
 fi
 
+# Resolve the Edge0 ref. Default: HEAD of the repository (the project ships
+# nearly every day and the models, not the engine, are what a release pins).
+# Pin EDGE0_REF to a commit when a build must be reproducible - a bad HEAD
+# would otherwise fail the whole image build.
+EDGE0_REPO="https://github.com/Edge0-AI/Edge0.git"
+EDGE0_REF="${EDGE0_REF:-latest}"
+if [[ "$INCLUDE_EDGE0" != "1" ]]; then
+    echo "edge0: skipped (INCLUDE_EDGE0=0)"
+    EDGE0_HASH="disabled"
+else
+    if [[ "${EDGE0_REF}" == "latest" || "${EDGE0_REF}" == "main" ]]; then
+        EDGE0_HASH=$(get_latest_hash "${EDGE0_REPO}")
+        [[ -n "${EDGE0_HASH}" ]] || { echo "ERROR: could not determine latest commit for Edge0" >&2; exit 1; }
+        echo "edge0: main HEAD: ${EDGE0_HASH}"
+    else
+        EDGE0_HASH=$(resolve_ref "${EDGE0_REPO}" "${EDGE0_REF}") || exit 1
+        echo "edge0: ${EDGE0_REF} -> ${EDGE0_HASH}"
+    fi
+fi
+
 # Resolve latest vLLM, aligned vLLM-Omni and SGLang versions from PyPI at
 # build time. Injecting the version strings as build-args forces BuildKit to
 # re-run the uv install layers whenever a version changes, avoiding stale
@@ -407,6 +439,7 @@ for pair in "llama.cpp:${INCLUDE_LLAMA}" \
             "vLLM-GGUF-plugin:${INCLUDE_VLLM_GGUF}" \
             "SGLang:${INCLUDE_SGLANG}" \
             "Strata:${INCLUDE_STRATA}" \
+            "Edge0:${INCLUDE_EDGE0}" \
             "stable-diffusion.cpp:${INCLUDE_SD}"; do
     name="${pair%%:*}"
     val="${pair##*:}"
@@ -426,6 +459,7 @@ BUILD_ARGS=(
     --build-arg "VLLM_OMNI_VERSION=${VLLM_OMNI_VERSION}"
     --build-arg "SGLANG_VERSION=${SGLANG_VERSION}"
     --build-arg "STRATA_COMMIT_HASH=${STRATA_HASH}"
+    --build-arg "EDGE0_COMMIT_HASH=${EDGE0_HASH}"
     --build-arg "INCLUDE_LLAMA=${INCLUDE_LLAMA}"
     --build-arg "INCLUDE_AUDIOCPP=${INCLUDE_AUDIOCPP}"
     --build-arg "INCLUDE_LLAMATTS=${INCLUDE_LLAMATTS}"
@@ -435,6 +469,7 @@ BUILD_ARGS=(
     --build-arg "INCLUDE_VLLM_GGUF=${INCLUDE_VLLM_GGUF}"
     --build-arg "INCLUDE_SGLANG=${INCLUDE_SGLANG}"
     --build-arg "INCLUDE_STRATA=${INCLUDE_STRATA}"
+    --build-arg "INCLUDE_EDGE0=${INCLUDE_EDGE0}"
     --build-arg "INCLUDE_SD=${INCLUDE_SD}"
     -f "${DOCKERFILE}"
 )
@@ -522,6 +557,7 @@ echo "Running static verification (no GPU required)..."
 if ! docker run --rm --entrypoint bash \
     -e INCLUDE_VLLM="$INCLUDE_VLLM" -e INCLUDE_VLLM_OMNI="$INCLUDE_VLLM_OMNI" -e INCLUDE_VLLM_GGUF="$INCLUDE_VLLM_GGUF" \
     -e INCLUDE_SGLANG="$INCLUDE_SGLANG" -e INCLUDE_STRATA="$INCLUDE_STRATA" \
+    -e INCLUDE_EDGE0="$INCLUDE_EDGE0" \
     "${DOCKER_IMAGE_TAG}" -c '
     set -e
     echo "--- nvcc ---"
@@ -589,6 +625,20 @@ if ! docker run --rm --entrypoint bash \
     else
         echo "strata: disabled (INCLUDE_STRATA=0)"
     fi
+    echo "--- edge0 ---"
+    if [ "$INCLUDE_EDGE0" = "1" ]; then
+        test -x /opt/edge0/edge0-strata/build/strata && echo "edge0 engine present"
+        test -x /opt/edge0/run && echo "edge0 launcher present"
+        /opt/edge0/edge0-strata/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL, psutil" && echo "edge0 venv ok"
+        # generate a config from the shipped template without touching weights
+        EDGE0_MODEL=/tmp/none \
+        EDGE0_TEMPLATE=/opt/edge0/edge0-strata/edge0/models/edge0-120b.json \
+            /opt/edge0/run --check >/dev/null \
+            && echo "edge0 launcher check ok"
+        ls /opt/edge0/edge0-strata/edge0/models/
+    else
+        echo "edge0: disabled (INCLUDE_EDGE0=0)"
+    fi
     echo "--- libvulkan_intel.so linked deps ---"
     if ldd /usr/lib/x86_64-linux-gnu/libvulkan_intel.so | grep -qi "not found"; then
         echo "ERROR: libvulkan_intel.so has missing shared library deps" >&2
@@ -642,6 +692,8 @@ echo "Built with:"
 echo "  llama.cpp:            ${LLAMA_HASH}"
 echo "  audio.cpp:            ${AUDIOCPP_HASH}"
 echo "  llama-swap:           $(docker run --rm --entrypoint cat "${DOCKER_IMAGE_TAG}" /versions.txt | grep llama-swap | cut -d' ' -f2-)"
+echo "  strata:               $(docker run --rm --entrypoint cat "${DOCKER_IMAGE_TAG}" /versions.txt | grep '^strata:' | cut -d' ' -f2-)"
+echo "  edge0:                $(docker run --rm --entrypoint cat "${DOCKER_IMAGE_TAG}" /versions.txt | grep '^edge0:' | cut -d' ' -f2-)"
 echo ""
 echo "Run with:"
 echo "  docker run -it --rm --gpus all ${DOCKER_IMAGE_TAG}"
