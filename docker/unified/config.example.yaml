@@ -1,0 +1,40 @@
+# placeholder example configuration
+healthCheckTimeout: 300
+logRequests: true
+
+models:
+  "llama":
+    cmd: >
+      llama-server
+      -hf bartowski/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M
+      --port ${PORT}
+
+  "tts":
+    checkEndpoint: /health
+    cmd: >
+      audiocpp_server
+      --task tts
+      --family qwen3_tts
+      --model /models/qwen3-tts
+      --port ${PORT}
+
+  # SGLang is the primary agent-reasoning backend (RadixAttention prefix
+  # sharing). Uses the isolated /opt/sglang-venv; --kv-cache-dtype fp8_e4m3
+  # halves KV cache memory (best on Ampere sm86 and newer).
+  "sglang-agent":
+    cmd: >
+      /opt/sglang-venv/bin/python -m sglang.launch_server
+      --model-path Qwen/Qwen3-7B-Instruct
+      --port ${PORT}
+      --kv-cache-dtype fp8_e4m3
+
+  # FastLLM (ztxz16/fastllm, isolated /opt/fastllm-venv). The launcher scopes
+  # its CUDA 12 libraries to this one process, so no other backend is touched.
+  # Adjust --model / --tp / --moe_device to your VRAM and model layout.
+  # apply-config-toggles.py comments this entry out when INCLUDE_FASTLLM=0.
+  "fastllm":
+    cmd: >
+      /opt/fastllm-venv/bin/ftllm-launch server /models/Qwen3.8-Flash-Next
+      --port ${PORT}
+      --tp 2
+      --moe_device numa

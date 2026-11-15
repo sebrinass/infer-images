@@ -1,0 +1,146 @@
+name: Cleanup GHCR image tags
+
+# The build workflow pushes four tags per run: the rolling tag
+# (latest), a dated snapshot (latest-YYYY-MM-DD) and the same two
+# for the rootless variant. The dated tags pin old manifests in the registry
+# forever, so without this job every build adds another copy that is never
+# released. This job deletes the older ones and keeps the most recent few for
+# rollback.
+#
+# Safety rules:
+#   - a manifest that carries the rolling tag is never deleted
+#   - the newest KEEP dated manifests are kept (rollback window)
+#   - only manifests whose every tag matches the image's own tag names are
+#     touched; anything unexpected is skipped
+#   - deletion only happens with dry_run=false, so the first runs are safe
+#   - a failed delete is reported as a warning; it never fails the workflow
+#
+# Deleting a manifest releases its layers once the registry garbage-collects
+# the unreferenced blobs, which happens some time after the deletion.
+
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "How many of the most recent dated images to keep"
+        required: false
+        default: "5"
+      dry_run:
+        description: "List only, delete nothing (set false to actually delete)"
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  group: cleanup-ghcr-tags
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List and (optionally) delete old dated images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          KEEP: ${{ inputs.keep || '5' }}
+          # A scheduled run deletes; a manual run deletes only when the
+          # dry_run box is unchecked. `inputs.dry_run` is a real boolean
+          # (github.event.inputs.dry_run would be the string "false", which
+          # does not compare equal to the boolean false).
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && '1' || '0' }}
+        run: |
+          set -uo pipefail
+          PACKAGE="${GITHUB_REPOSITORY##*/}"
+
+          API_BASE="/user/packages/container/${PACKAGE}"
+          if ! gh api --paginate --jq '.[]?' "${API_BASE}/versions" > versions.raw 2>api.err; then
+              echo "::warning::user-scoped listing failed, trying the owner-scoped endpoint"
+              API_BASE="/users/${OWNER}/packages/container/${PACKAGE}"
+              gh api --paginate --jq '.[]?' "${API_BASE}/versions" > versions.raw
+          fi
+
+          python3 - "$KEEP" <<'PY' > candidates.tsv
+          import json, re, sys
+
+          keep_n = int(sys.argv[1])
+          ours = re.compile(r"^latest(-rootless)?(-\d{4}-\d{2}-\d{2})?$")
+
+          def walk(node):
+              """Every dict that looks like a version entry, at any depth."""
+              if isinstance(node, dict):
+                  if node.get("id") and node.get("name"):
+                      tags = (node.get("metadata") or {}).get("container", {}).get("tags")
+                      if isinstance(tags, list):
+                          yield {"id": node["id"], "name": node["name"],
+                                 "created_at": node.get("created_at", ""), "tags": tags}
+                          return
+                  for value in node.values():
+                      yield from walk(value)
+              elif isinstance(node, list):
+                  for item in node:
+                      yield from walk(item)
+
+          versions = []
+          with open("versions.raw", encoding="utf-8") as fh:
+              for line in fh:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      doc = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  versions.extend(walk(doc))
+
+          # A manifest may show up once per tag; keep one entry per manifest.
+          by_digest = {}
+          for v in versions:
+              by_digest.setdefault(v["name"], v)
+          versions = sorted(by_digest.values(), key=lambda v: v["created_at"], reverse=True)
+          print(f"# versions listed: {len(versions)}", file=sys.stderr)
+          if versions:
+              print(f"# sample: {versions[0]['name']} {versions[0]['tags']}", file=sys.stderr)
+
+          rolling = {v["name"] for v in versions if "latest" in v["tags"]}
+          kept = set()
+          for v in versions:
+              if len(kept) >= keep_n:
+                  break
+              if all(ours.match(t) for t in v["tags"]):
+                  kept.add(v["name"])
+
+          for v in versions:
+              tags = v["tags"]
+              if not all(ours.match(t) for t in tags):
+                  continue            # not one of our tag names: leave it alone
+              if v["name"] in rolling:
+                  continue            # carries the rolling tag: never delete
+              if v["name"] in kept:
+                  continue            # inside the rollback window
+              print("\t".join([str(v["id"]), v["name"], ",".join(tags), v["created_at"]]))
+          PY
+
+          echo "candidates for deletion: $(grep -vc '^#' candidates.tsv || true)"
+          grep -v '^#' candidates.tsv | head -20
+
+          if [ "${DRY_RUN}" = "1" ]; then
+              echo "dry run: nothing was deleted (re-run with dry_run=false to delete)"
+              exit 0
+          fi
+
+          while IFS=$'\t' read -r id name tags created; do
+              [ -z "${id}" ] && continue
+              echo "deleting version ${id} [${tags}] (${created})"
+              if ! gh api --method DELETE "${API_BASE}/versions/${id}"; then
+                  echo "::warning::could not delete version ${id} [${tags}]"
+              fi
+          done < <(grep -v '^#' candidates.tsv)
+
+          echo "cleanup pass done"

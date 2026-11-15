@@ -1,0 +1,244 @@
+name: Build Inference Images
+
+on:
+  push:
+    paths:
+      - "docker/unified/**"
+      - ".github/workflows/unified-docker.yml"
+
+  schedule:
+    - cron: "37 5 */3 * *"
+
+  workflow_dispatch:
+    inputs:
+      llama_cpp_ref:
+        description: "llama.cpp commit hash, tag, or branch"
+        required: false
+        default: "master"
+      audiocpp_ref:
+        description: "audio.cpp commit hash, tag, or branch"
+        required: false
+        default: "main"
+      llama_swap_version:
+        description: "llama-swap version (e.g. v198, latest, main)"
+        required: false
+        default: "main"
+      strata_ref:
+        description: "Strata ref: 'latest' release, tag, or commit"
+        required: false
+        default: "latest"
+      include_llama:
+        description: "Include llama.cpp (CUDA+Vulkan dual backend)"
+        type: boolean
+        required: false
+        default: true
+      include_audiocpp:
+        description: "Include audio.cpp (TTS/ASR) - opt-in, off by default"
+        type: boolean
+        required: false
+        default: false
+      include_llama_swap:
+        description: "Include the llama-swap binary (image entrypoint)"
+        type: boolean
+        required: false
+        default: true
+      include_vllm:
+        description: "Include vLLM (core venv)"
+        type: boolean
+        required: false
+        default: true
+      include_vllm_omni:
+        description: "Opt in to vLLM-Omni (version auto-aligned to the vLLM line)"
+        type: boolean
+        required: false
+        default: false
+      include_vllm_gguf:
+        description: "Opt in to vllm-gguf-plugin (GGUF models via vLLM)"
+        type: boolean
+        required: false
+        default: false
+      include_sglang:
+        description: "Include SGLang"
+        type: boolean
+        required: false
+        default: false
+      include_strata:
+        description: "Include Strata (Qwen3.8-Flash-Next engine)"
+        type: boolean
+        required: false
+        default: true
+      include_fastllm:
+        description: "Include FastLLM (isolated CUDA 12 venv, latest ftllm from PyPI)"
+        type: boolean
+        required: false
+        default: true
+      include_sd:
+        description: "Opt in to stable-diffusion.cpp (off by default)"
+        type: boolean
+        required: false
+        default: false
+      include_llamatts:
+        description: "Opt in to llama.cpp's llama-tts tool (off by default)"
+        type: boolean
+        required: false
+        default: false
+      build_rootless:
+        description: "Also build the rootless (non-root user) variant (off by default)"
+        type: boolean
+        required: false
+        default: false
+      build_cuda:
+        description: "Build CUDA image"
+        type: boolean
+        required: false
+        default: true
+      push_to_ghcr:
+        description: "Push images to ghcr.io"
+        type: boolean
+        required: false
+        default: true
+
+# One build at a time per ref: a manually dispatched run (e.g. with components
+# switched off) cancels the push-triggered full build instead of racing it for
+# the same ghcr tags.
+concurrency:
+  group: unified-docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          backends=()
+          if [[ "${{ github.event_name }}" == "push" ]] || [[ "${{ github.event_name }}" == "schedule" ]] || [[ "${{ inputs.build_cuda }}" == "true" ]]; then
+            backends+=("cuda")
+          fi
+          matrix=$(printf '%s\n' "${backends[@]}" | jq -R . | jq -sc .)
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup
+    if: ${{ needs.setup.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
+
+      - name: Free up disk space
+        run: |
+          echo "Before cleanup:"
+          df -h
+          # The unified image is ~16GB (vLLM + SGLang venvs + CUDA runtime).
+          # The stock ubuntu-latest image only leaves ~14GB free after the
+          # default cleanup, which caused "no space left on device" during
+          # docker buildx --load. Aggressively purge preinstalled toolchains
+          # to free ~25GB+ before building.
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/lib/mono
+          sudo rm -rf /home/runner/.cache
+          sudo docker system prune -af
+          sudo apt-get clean
+          echo "After cleanup:"
+          df -h
+
+      - name: Set up Docker Buildx
+        if: ${{ !env.ACT }}
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd #v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        if: ${{ !env.ACT }}
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 #v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build unified Docker image (${{ matrix.backend }})
+        env:
+          LLAMA_REF: ${{ inputs.llama_cpp_ref || 'master' }}
+          AUDIOCPP_REF: ${{ inputs.audiocpp_ref || 'main' }}
+          LS_VERSION: ${{ inputs.llama_swap_version || 'main' }}
+          STRATA_REF: ${{ inputs.strata_ref || 'latest' }}
+          # Authenticate the api.github.com release lookups in
+          # build-image.sh - anonymous calls from shared runner IPs
+          # get random 403 rate-limits (killed scheduled run #99).
+          GITHUB_TOKEN: ${{ github.token }}
+          # Component toggles.
+          #
+          # CAUTION (2026-10-20 incident): on push/schedule events the `inputs`
+          # context is EMPTY, and GitHub's loose equality makes `'' == false`
+          # evaluate to TRUE (both coerce to number 0). The previous form
+          # `${{ inputs.x == false && '0' || '1' }}` therefore disabled EVERY
+          # component on the 2026-10-19 scheduled build and pushed an empty
+          # shell image to the tracked tag, which killed the Unraid container
+          # on its next auto-update. Rule: on non-dispatch events the default
+          # components are always ON; checkboxes only matter for manual runs.
+          INCLUDE_LLAMA: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_llama == true) && '1' || '0' }}
+          INCLUDE_LLAMA_SWAP: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_llama_swap == true) && '1' || '0' }}
+          INCLUDE_VLLM: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_vllm == true) && '1' || '0' }}
+          # vLLM add-ons are opt-in: only an explicit `true` (manual run with
+          # the box checked) enables them; push/schedule builds leave them out.
+          INCLUDE_VLLM_OMNI: ${{ inputs.include_vllm_omni == true && '1' || '0' }}
+          INCLUDE_VLLM_GGUF: ${{ inputs.include_vllm_gguf == true && '1' || '0' }}
+          INCLUDE_STRATA: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_strata == true) && '1' || '0' }}
+          # FastLLM is on by default like Strata: unchecking the box on a
+          # manual run turns it off with one click. Same safe non-dispatch form
+          # as INCLUDE_STRATA (an empty `inputs` context must NOT disable it).
+          INCLUDE_FASTLLM: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_fastllm == true) && '1' || '0' }}
+          # SGLang is opt-in (vLLM covers the same models): only an explicit
+          # `true` on a manual run enables it, push/schedule builds leave it out.
+          INCLUDE_SGLANG: ${{ inputs.include_sglang == true && '1' || '0' }}
+          # SD is opt-in: only an explicit `true` enables it.
+          INCLUDE_SD: ${{ inputs.include_sd == true && '1' || '0' }}
+          # audio.cpp, llama-tts and the rootless variant are opt-in the same
+          # way: an explicit `true` on a manual run enables them, push/schedule
+          # builds leave them out. (The opt-in form is safe here: an empty
+          # `inputs` value compares false against `true`, so it yields '0'.)
+          INCLUDE_AUDIOCPP: ${{ inputs.include_audiocpp == true && '1' || '0' }}
+          INCLUDE_LLAMATTS: ${{ inputs.include_llamatts == true && '1' || '0' }}
+          BUILD_ROOTLESS: ${{ inputs.build_rootless == true && '1' || '0' }}
+          DOCKER_IMAGE_TAG: ghcr.io/${{ github.repository }}:latest
+          BUILDX_BUILDER: ${{ env.ACT == 'true' && 'llama-swap-builder' || '' }}
+        run: |
+          chmod +x docker/unified/build-image.sh
+          docker/unified/build-image.sh --${{ matrix.backend }}
+
+      - name: Push to GitHub Container Registry
+        if: ${{ !env.ACT && (github.event_name == 'push' || github.event_name == 'schedule' || inputs.push_to_ghcr == true) }}
+        env:
+          BUILD_ROOTLESS: ${{ inputs.build_rootless == true && '1' || '0' }}
+        run: |
+          BASE_TAG="ghcr.io/${{ github.repository }}:latest"
+          DATE_TAG=$(date -u +%Y-%m-%d)
+
+          docker push "${BASE_TAG}"
+          docker tag "${BASE_TAG}" "${BASE_TAG}-${DATE_TAG}"
+          docker push "${BASE_TAG}-${DATE_TAG}"
+
+          # The rootless variant is opt-in (BUILD_ROOTLESS=1). It is a separate
+          # image with its own ~20 GB chown layer, and nothing consumes it.
+          if [ "${BUILD_ROOTLESS}" = "1" ]; then
+            ROOTLESS_TAG="${BASE_TAG}-rootless"
+            docker push "${ROOTLESS_TAG}"
+            docker tag "${ROOTLESS_TAG}" "${ROOTLESS_TAG}-${DATE_TAG}"
+            docker push "${ROOTLESS_TAG}-${DATE_TAG}"
+          fi

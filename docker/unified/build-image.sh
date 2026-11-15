@@ -1,0 +1,692 @@
+#!/bin/bash
+#
+# Build script for unified container with version pinning
+#
+# Usage:
+#   ./build-image.sh --cuda                              # Build CUDA image
+#   ./build-image.sh --cuda --no-cache                   # Build without cache
+#   LLAMA_REF=b1234 ./build-image.sh --cuda             # Pin llama.cpp to a commit hash
+#   LLAMA_REF=v1.2.3 ./build-image.sh --cuda            # Pin llama.cpp to a tag
+#   AUDIOCPP_REF=main ./build-image.sh --cuda           # Pin audio.cpp to a branch
+#   LS_VERSION=170 ./build-image.sh --cuda              # Override llama-swap version
+#
+
+set -euo pipefail
+
+BACKEND="cuda"
+NO_CACHE=false
+
+# Component toggles: 1 = build into the image, 0 = skip.
+# The matching INCLUDE_* env vars seed the defaults, CLI flags override them.
+INCLUDE_LLAMA="${INCLUDE_LLAMA:-1}"
+# audio.cpp is opt-in (default off): no live config entry invokes
+# audiocpp_server / audiocpp_cli (TTS runs in the separate Qwen3-TTS
+# container, ASR in the llama.cpp-served Qwen3-ASR-1.7B).
+INCLUDE_AUDIOCPP="${INCLUDE_AUDIOCPP:-0}"
+# llama.cpp's llama-tts tool is opt-in (default off): ~128 MB, unused by any
+# live model entry.
+INCLUDE_LLAMATTS="${INCLUDE_LLAMATTS:-0}"
+INCLUDE_LLAMA_SWAP="${INCLUDE_LLAMA_SWAP:-1}"
+INCLUDE_VLLM="${INCLUDE_VLLM:-1}"
+# vLLM add-ons are opt-in (default off, like SD): unused by the live config,
+# and vllm-omni's stable track lags vLLM's versioning.
+INCLUDE_VLLM_OMNI="${INCLUDE_VLLM_OMNI:-0}"
+INCLUDE_VLLM_GGUF="${INCLUDE_VLLM_GGUF:-0}"
+# SGLang is opt-in (default off): vLLM covers the same models (Ornith verified
+# for text/tools/images), and its ~9.5 GB venv crowded the docker disk.
+INCLUDE_SGLANG="${INCLUDE_SGLANG:-0}"
+INCLUDE_STRATA="${INCLUDE_STRATA:-1}"
+# FastLLM is on by default (like Strata) and lives in a fully isolated venv.
+# One-click off: --no-fastllm / INCLUDE_FASTLLM=0. It has its own CUDA 12 pip
+# wheels, so it never touches the global PATH / LD_LIBRARY_PATH and cannot
+# affect llama.cpp, vLLM, SGLang or Strata.
+INCLUDE_FASTLLM="${INCLUDE_FASTLLM:-1}"
+# SD is opt-in (default off): nothing is built unless explicitly requested.
+INCLUDE_SD="${INCLUDE_SD:-0}"
+# The rootless variant (container runs as an unprivileged user) is a separate
+# image layered on top of the main one. It re-chowns ~20 GB of venv files,
+# which Docker turns into a full extra copy of them in a new layer. Nothing
+# on this box consumes it, so it is opt-in.
+BUILD_ROOTLESS="${BUILD_ROOTLESS:-0}"
+
+for arg in "$@"; do
+    case $arg in
+        --cuda)
+            BACKEND="cuda"
+            ;;
+        --no-cache)
+            NO_CACHE=true
+            ;;
+        --no-llama)
+            INCLUDE_LLAMA=0
+            ;;
+        --no-audiocpp)
+            INCLUDE_AUDIOCPP=0
+            ;;
+        --audiocpp)
+            INCLUDE_AUDIOCPP=1
+            ;;
+        --llamatts)
+            INCLUDE_LLAMATTS=1
+            ;;
+        --rootless)
+            BUILD_ROOTLESS=1
+            ;;
+        --no-llama-swap)
+            INCLUDE_LLAMA_SWAP=0
+            ;;
+        --no-vllm)
+            INCLUDE_VLLM=0
+            ;;
+        --vllm-omni)
+            INCLUDE_VLLM_OMNI=1
+            ;;
+        --vllm-gguf)
+            INCLUDE_VLLM_GGUF=1
+            ;;
+        --no-sglang)
+            INCLUDE_SGLANG=0
+            ;;
+        --sglang)
+            INCLUDE_SGLANG=1
+            ;;
+        --no-strata)
+            INCLUDE_STRATA=0
+            ;;
+        --no-fastllm)
+            INCLUDE_FASTLLM=0
+            ;;
+        --fastllm)
+            INCLUDE_FASTLLM=1
+            ;;
+        --sd)
+            INCLUDE_SD=1
+            ;;
+        --help|-h)
+            echo "Usage: ./build-image.sh [--cuda] [--no-cache] [--no-llama] [--no-audiocpp] [--audiocpp] [--llamatts] [--no-llama-swap] [--no-vllm] [--sglang] [--no-sglang] [--no-strata] [--fastllm] [--no-fastllm] [--vllm-omni] [--vllm-gguf] [--sd] [--rootless]"
+            echo ""
+            echo "Options:"
+            echo "  --cuda      Build the unified CUDA image (default)"
+            echo "  --no-cache  Force rebuild without using Docker cache"
+            echo "  --help, -h  Show this help message"
+            echo ""
+            echo "Component switches (default: llama.cpp + llama-swap + vLLM + Strata; SGLang, audio.cpp, llama-tts, SD and the vLLM add-ons are opt-in):"
+            echo "  --no-llama       Skip llama.cpp (CUDA+Vulkan build, slowest stage)"
+            echo "  --no-audiocpp    Skip audio.cpp (TTS/ASR binaries + model_specs)"
+            echo "  --audiocpp       Opt IN to audio.cpp"
+            echo "  --llamatts       Opt IN to llama.cpp's llama-tts tool"
+            echo "  --no-llama-swap  Skip the llama-swap binary (image loses its entrypoint!)"
+            echo "  --no-vllm        Skip vLLM + its venv (~4.7 GB)"
+            echo "  --sglang         Opt IN to SGLang (~9.5 GB venv; off by default, vLLM covers the same models)"
+            echo "  --no-sglang      Skip SGLang (already the default)"
+            echo "  --no-strata      Skip Strata engine + venv (~1 GB)"
+            echo "  --no-fastllm     Skip FastLLM (isolated CUDA 12 venv, ~1-2 GB)"
+            echo "  --fastllm        Opt IN to FastLLM (already the default)"
+            echo "  --vllm-omni      Opt IN to vLLM-Omni (version auto-aligned to the vLLM line)"
+            echo "  --vllm-gguf      Opt IN to vllm-gguf-plugin (GGUF models via vLLM)"
+            echo "  --sd             Opt IN to stable-diffusion.cpp (off by default)"
+            echo "  --rootless       Also build the rootless (non-root user) variant (off by default)"
+            echo ""
+            echo "Environment variables:"
+            echo "  DOCKER_IMAGE_TAG     Set custom image tag (default: infer-images:latest)"
+            echo "  LLAMA_REF            Pin llama.cpp to a commit, tag, or branch"
+            echo "  AUDIOCPP_REF         Pin audio.cpp to a commit, tag, or branch"
+            echo "  LS_VERSION           Override llama-swap version (e.g., '170' or 'latest')"
+            echo "  VLLM_OMNI_REF        Pin vLLM-Omni explicitly (default: auto-aligned to VLLM_VERSION)"
+            echo "  INCLUDE_VLLM_OMNI=1  Same as --vllm-omni (likewise INCLUDE_VLLM_GGUF)"
+            echo "  INCLUDE_VLLM=0       Same as --no-vllm (likewise for the other components)"
+            exit 0
+            ;;
+    esac
+done
+
+DOCKER_IMAGE_TAG="${DOCKER_IMAGE_TAG:-infer-images:latest}"
+CACHE_TAG="${CACHE_TAG:-build-cache}"
+
+# The vLLM add-ons only make sense with the vLLM venv itself. Checked AFTER
+# CLI parsing so `--no-vllm --vllm-omni` is caught too.
+if [[ "$INCLUDE_VLLM" != "1" ]]; then
+    if [[ "$INCLUDE_VLLM_OMNI" == "1" || "$INCLUDE_VLLM_GGUF" == "1" ]]; then
+        echo "NOTE: --no-vllm removes the vLLM venv entirely; forcing vllm-omni/gguf off."
+    fi
+    INCLUDE_VLLM_OMNI=0
+    INCLUDE_VLLM_GGUF=0
+fi
+
+# Git repository URLs
+LLAMA_REPO="https://github.com/ggml-org/llama.cpp.git"
+AUDIOCPP_REPO="https://github.com/0xShug0/audio.cpp.git"
+LLAMA_SWAP_REPO="https://github.com/mostlygeek/llama-swap.git"
+
+# Resolve a git ref (commit hash, tag, or branch) to a full commit hash.
+# Requires only: git, network access to the remote.
+resolve_ref() {
+    local repo_url="$1"
+    local ref="$2"
+
+    # Full 40-char SHA — use as-is
+    if [[ "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "${ref}"
+        return
+    fi
+
+    # Try tag then branch (exact match)
+    local hash
+    hash=$(git ls-remote "${repo_url}" "refs/tags/${ref}" "refs/heads/${ref}" 2>/dev/null | head -1 | cut -f1)
+    if [[ -n "${hash}" ]]; then
+        echo "${hash}"
+        return
+    fi
+
+    # Short hash (7+ chars): scan all refs for a SHA with this prefix
+    if [[ "${ref}" =~ ^[0-9a-f]{7,}$ ]]; then
+        hash=$(git ls-remote "${repo_url}" 2>/dev/null | grep "^${ref}" | head -1 | cut -f1)
+        if [[ -n "${hash}" ]]; then
+            echo "${hash}"
+            return
+        fi
+    fi
+
+    echo "ERROR: Could not resolve ref '${ref}' for ${repo_url}" >&2
+    if [[ "${ref}" =~ ^[0-9a-f]+$ && ${#ref} -lt 7 ]]; then
+        echo "  Short hashes must be at least 7 characters (got ${#ref})." >&2
+    else
+        echo "  Tried: tag, branch, git ls-remote prefix match" >&2
+    fi
+    echo "  Use a full 40-char SHA, a tag name, a branch name, or a 7+ char short hash." >&2
+    return 1
+}
+
+# Resolve HEAD of a repo without needing to know the default branch name.
+get_latest_hash() {
+    git ls-remote "${1}" HEAD 2>/dev/null | head -1 | cut -f1
+}
+
+# Resolve a vLLM-Omni version that matches the vLLM major.minor line.
+# vllm-omni tracks vLLM's internal APIs, so its version MUST follow the vLLM
+# line (0.31.x omni <-> 0.31.x vllm). Taking PyPI's latest *stable* blindly
+# caused the 0.30.0-vs-0.31.0 mismatch (RoutedExpertsLists ImportError) —
+# the two packages release on independent schedules. Pre-releases count:
+# omni frequently ships the matching version as an rc first (0.31.0rc1 for
+# vLLM 0.31.0). VLLM_OMNI_REF overrides everything.
+# Usage: VLLM_OMNI_REF="" resolve_omni_version "0.31.0"  ->  prints e.g. 0.31.0rc1
+resolve_omni_version() {
+    local vllm_ver="$1"
+    if [[ -n "${VLLM_OMNI_REF:-}" ]]; then
+        echo "${VLLM_OMNI_REF}"
+        return 0
+    fi
+    curl -fsSL --max-time 60 https://pypi.org/pypi/vllm-omni/json | \
+        VLLM_VER="$vllm_ver" python3 -c '
+import json
+import os
+import re
+import sys
+
+vllm_ver = os.environ["VLLM_VER"]
+m = re.match(r"^(\d+\.\d+)\.", vllm_ver)
+if not m:
+    sys.exit("cannot parse vLLM version %r" % vllm_ver)
+prefix = m.group(1)  # e.g. "0.31"
+
+try:
+    data = json.load(sys.stdin)
+except Exception as exc:
+    sys.exit("PyPI response not valid JSON: %s" % exc)
+
+cands = []
+for ver, files in data["releases"].items():
+    if not files:
+        continue
+    vm = re.match(r"^(\d+\.\d+)\.", ver)
+    if vm and vm.group(1) == prefix:
+        cands.append(ver)
+if not cands:
+    sys.exit("no vllm-omni release found for line %s.x (vLLM %s)" % (prefix, vllm_ver))
+
+def vkey(v):
+    # "0.31.0rc1" -> ((0,31,0), 0, "rc1"); "0.31.0" -> ((0,31,0), 1, "").
+    # A final release (flag 1) sorts AFTER any prerelease of the same numbers
+    # (flag 0), so max() prefers the final when it exists.
+    m = re.match(r"^(\d+(?:\.\d+)*)(.*)$", v)
+    nums = tuple(int(p) for p in m.group(1).split("."))
+    rest = m.group(2)
+    if rest == "":
+        return (nums, 1, "")
+    return (nums, 0, rest)
+
+cands.sort(key=vkey)
+print(cands[-1])
+'
+}
+
+echo "=========================================="
+echo "llama-swap Unified Build (${BACKEND})"
+echo "=========================================="
+echo ""
+
+# Resolve llama.cpp ref (skipped entirely when the component is disabled)
+if [[ "$INCLUDE_LLAMA" != "1" ]]; then
+    echo "llama.cpp: skipped (INCLUDE_LLAMA=0)"
+    LLAMA_HASH="disabled"
+elif [[ -n "${LLAMA_REF:-}" ]]; then
+    LLAMA_HASH=$(resolve_ref "${LLAMA_REPO}" "${LLAMA_REF}") || exit 1
+    echo "llama.cpp: ${LLAMA_REF} -> ${LLAMA_HASH}"
+else
+    LLAMA_HASH=$(get_latest_hash "${LLAMA_REPO}")
+    if [[ -z "${LLAMA_HASH}" ]]; then
+        echo "ERROR: Could not determine latest commit for llama.cpp" >&2
+        exit 1
+    fi
+    echo "llama.cpp: latest HEAD: ${LLAMA_HASH}"
+fi
+
+# Resolve audio.cpp ref (skipped entirely when the component is disabled)
+if [[ "$INCLUDE_AUDIOCPP" != "1" ]]; then
+    echo "audio.cpp: skipped (INCLUDE_AUDIOCPP=0)"
+    AUDIOCPP_HASH="disabled"
+elif [[ -n "${AUDIOCPP_REF:-}" ]]; then
+    AUDIOCPP_HASH=$(resolve_ref "${AUDIOCPP_REPO}" "${AUDIOCPP_REF}") || exit 1
+    echo "audio.cpp: ${AUDIOCPP_REF} -> ${AUDIOCPP_HASH}"
+else
+    AUDIOCPP_HASH=$(get_latest_hash "${AUDIOCPP_REPO}")
+    if [[ -z "${AUDIOCPP_HASH}" ]]; then
+        echo "ERROR: Could not determine latest commit for audio.cpp" >&2
+        exit 1
+    fi
+    echo "audio.cpp: latest HEAD: ${AUDIOCPP_HASH}"
+fi
+
+# Resolve llama-swap ref (skipped entirely when the component is disabled)
+if [[ "$INCLUDE_LLAMA_SWAP" != "1" ]]; then
+    echo "llama-swap: skipped (INCLUDE_LLAMA_SWAP=0)"
+    LS_HASH="disabled"
+elif [[ -n "${LS_VERSION:-}" ]]; then
+    LS_HASH=$(resolve_ref "${LLAMA_SWAP_REPO}" "${LS_VERSION}") || exit 1
+    echo "llama-swap: ${LS_VERSION} -> ${LS_HASH}"
+else
+    LS_HASH=$(get_latest_hash "${LLAMA_SWAP_REPO}")
+    if [[ -z "${LS_HASH}" ]]; then
+        echo "ERROR: Could not determine latest commit for llama-swap" >&2
+        exit 1
+    fi
+    echo "llama-swap: latest HEAD: ${LS_HASH}"
+fi
+
+# Resolve Strata ref. Default "latest": follow Strata's newest GitHub release so
+# the 3-day cron automatically picks up upstream fixes (the slow conversation
+# checkpoint replay #2316, the coarse-restore #2228, ...). Pin an exact tag via
+# STRATA_REF / the workflow's strata_ref input whenever a build must be
+# reproducible - Strata ships daily and a broken release can slip in.
+STRATA_REPO="https://github.com/Niko1221/Strata.git"
+STRATA_REF="${STRATA_REF:-latest}"
+if [[ "$INCLUDE_STRATA" != "1" ]]; then
+    echo "strata: skipped (INCLUDE_STRATA=0)"
+    STRATA_HASH="disabled"
+else
+    if [[ "${STRATA_REF}" == "latest" || "${STRATA_REF}" == "release" ]]; then
+        # Run #99 (2026-11-04): anonymous api.github.com calls from shared
+        # Actions runner IPs get random 403 rate-limits. Authenticate when a
+        # token is available (workflow passes GITHUB_TOKEN) and retry before
+        # giving up.
+        STRATA_REF=""
+        for _try in 1 2 3; do
+            _strata_url="https://api.github.com/repos/Niko1221/Strata/releases/latest"
+            if [[ -n "${GITHUB_TOKEN}" ]]; then
+                STRATA_REF=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "${_strata_url}" \
+                    | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+            else
+                STRATA_REF=$(curl -fsSL "${_strata_url}" \
+                    | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+            fi
+            [[ -n "${STRATA_REF}" ]] && break
+            echo "WARN: resolve Strata release tag failed (attempt ${_try}/3), retrying" >&2
+            sleep 10
+        done
+        [[ -n "${STRATA_REF}" ]] || {
+            echo "ERROR: could not resolve the latest Strata release tag" >&2; exit 1; }
+    fi
+    STRATA_HASH=$(resolve_ref "${STRATA_REPO}" "${STRATA_REF}") || exit 1
+    echo "strata: ${STRATA_REF} -> ${STRATA_HASH}"
+fi
+
+# Resolve latest vLLM, aligned vLLM-Omni and SGLang versions from PyPI at
+# build time. Injecting the version strings as build-args forces BuildKit to
+# re-run the uv install layers whenever a version changes, avoiding stale
+# cache hits (same pattern used for LLAMA_COMMIT_HASH / AUDIOCPP_COMMIT_HASH
+# above). vLLM / SGLang are deliberately NOT locked so images pick up new
+# releases; vLLM-Omni IS version-aligned to the vLLM line (see
+# resolve_omni_version). Disabled components skip the lookup entirely.
+VLLM_VERSION=""
+VLLM_OMNI_VERSION=""
+SGLANG_VERSION=""
+FASTLLM_VERSION=""
+if [[ "$INCLUDE_VLLM" != "1" ]]; then
+    echo "vllm: skipped (INCLUDE_VLLM=0)"
+    VLLM_VERSION="disabled"
+    VLLM_OMNI_VERSION="disabled"
+else
+    echo "Resolving vLLM version from PyPI..."
+    if ! VLLM_VERSION=$(curl -fsSL https://pypi.org/pypi/vllm/json | python3 -c "import json,sys; print(json.load(sys.stdin)['info']['version'])" 2>&1); then
+        echo "ERROR: Failed to resolve vLLM version from PyPI" >&2
+        echo "  curl/python output: ${VLLM_VERSION}" >&2
+        exit 1
+    fi
+    echo "vllm: latest PyPI version: ${VLLM_VERSION}"
+
+    if [[ "$INCLUDE_VLLM_OMNI" == "1" ]]; then
+        echo "Resolving vLLM-Omni version (aligned to vLLM ${VLLM_VERSION})..."
+        if ! VLLM_OMNI_VERSION=$(resolve_omni_version "${VLLM_VERSION}" 2>&1); then
+            echo "ERROR: Failed to resolve a vLLM-Omni version aligned to vLLM ${VLLM_VERSION}" >&2
+            echo "  resolver output: ${VLLM_OMNI_VERSION}" >&2
+            echo "  Pin one explicitly: VLLM_OMNI_REF=0.31.0rc1 ./build-image.sh --cuda --vllm-omni" >&2
+            exit 1
+        fi
+        echo "vllm-omni: aligned version: ${VLLM_OMNI_VERSION}"
+    else
+        VLLM_OMNI_VERSION="disabled"
+        echo "vllm-omni: skipped (INCLUDE_VLLM_OMNI=0)"
+    fi
+fi
+
+if [[ "$INCLUDE_SGLANG" != "1" ]]; then
+    echo "sglang: skipped (INCLUDE_SGLANG=0)"
+    SGLANG_VERSION="disabled"
+else
+    echo "Resolving SGLang version from PyPI..."
+    if ! SGLANG_VERSION=$(curl -fsSL https://pypi.org/pypi/sglang/json | python3 -c "import json,sys; print(json.load(sys.stdin)['info']['version'])" 2>&1); then
+        echo "ERROR: Failed to resolve SGLang version from PyPI" >&2
+        echo "  curl/python output: ${SGLANG_VERSION}" >&2
+        exit 1
+    fi
+    echo "sglang: latest PyPI version: ${SGLANG_VERSION}"
+fi
+
+# FastLLM (PyPI package name: ftllm). Deliberately NOT locked: resolve the
+# latest release on every build and inject the version string as a build-arg
+# so a new upstream release busts the BuildKit layer cache. No constraints
+# file is used - upstream's own CUDA 12 pip dependencies resolve freely.
+if [[ "$INCLUDE_FASTLLM" != "1" ]]; then
+    echo "fastllm: skipped (INCLUDE_FASTLLM=0)"
+    FASTLLM_VERSION="disabled"
+else
+    echo "Resolving FastLLM (ftllm) version from PyPI..."
+    if ! FASTLLM_VERSION=$(curl -fsSL https://pypi.org/pypi/ftllm/json | python3 -c "import json,sys; print(json.load(sys.stdin)['info']['version'])" 2>&1); then
+        echo "ERROR: Failed to resolve ftllm version from PyPI" >&2
+        echo "  curl/python output: ${FASTLLM_VERSION}" >&2
+        exit 1
+    fi
+    echo "fastllm: latest PyPI version: ${FASTLLM_VERSION}"
+fi
+
+echo ""
+echo "=========================================="
+echo "Starting Docker build..."
+echo "=========================================="
+echo ""
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCKERFILE="${DOCKERFILE:-${SCRIPT_DIR}/Dockerfile}"
+
+echo "Components:"
+for pair in "llama.cpp:${INCLUDE_LLAMA}" \
+            "llama-tts:${INCLUDE_LLAMATTS}" \
+            "audio.cpp:${INCLUDE_AUDIOCPP}" \
+            "llama-swap:${INCLUDE_LLAMA_SWAP}" \
+            "vLLM:${INCLUDE_VLLM}" \
+            "vLLM-Omni:${INCLUDE_VLLM_OMNI}" \
+            "vLLM-GGUF-plugin:${INCLUDE_VLLM_GGUF}" \
+            "SGLang:${INCLUDE_SGLANG}" \
+            "Strata:${INCLUDE_STRATA}" \
+            "FastLLM:${INCLUDE_FASTLLM}" \
+            "stable-diffusion.cpp:${INCLUDE_SD}"; do
+    name="${pair%%:*}"
+    val="${pair##*:}"
+    if [ "$val" = "1" ]; then
+        echo "  $name: included"
+    else
+        echo "  $name: SKIPPED"
+    fi
+done
+echo ""
+
+BUILD_ARGS=(
+    --build-arg "LLAMA_COMMIT_HASH=${LLAMA_HASH}"
+    --build-arg "AUDIOCPP_COMMIT_HASH=${AUDIOCPP_HASH}"
+    --build-arg "LS_VERSION=${LS_HASH}"
+    --build-arg "VLLM_VERSION=${VLLM_VERSION}"
+    --build-arg "VLLM_OMNI_VERSION=${VLLM_OMNI_VERSION}"
+    --build-arg "SGLANG_VERSION=${SGLANG_VERSION}"
+    --build-arg "FASTLLM_VERSION=${FASTLLM_VERSION}"
+    --build-arg "STRATA_COMMIT_HASH=${STRATA_HASH}"
+    --build-arg "INCLUDE_LLAMA=${INCLUDE_LLAMA}"
+    --build-arg "INCLUDE_AUDIOCPP=${INCLUDE_AUDIOCPP}"
+    --build-arg "INCLUDE_LLAMATTS=${INCLUDE_LLAMATTS}"
+    --build-arg "INCLUDE_LLAMA_SWAP=${INCLUDE_LLAMA_SWAP}"
+    --build-arg "INCLUDE_VLLM=${INCLUDE_VLLM}"
+    --build-arg "INCLUDE_VLLM_OMNI=${INCLUDE_VLLM_OMNI}"
+    --build-arg "INCLUDE_VLLM_GGUF=${INCLUDE_VLLM_GGUF}"
+    --build-arg "INCLUDE_SGLANG=${INCLUDE_SGLANG}"
+    --build-arg "INCLUDE_STRATA=${INCLUDE_STRATA}"
+    --build-arg "INCLUDE_FASTLLM=${INCLUDE_FASTLLM}"
+    --build-arg "INCLUDE_SD=${INCLUDE_SD}"
+    -f "${DOCKERFILE}"
+)
+# NOTE: no `-t` here on purpose. Registry (CI) builds push a STAGING tag first
+# and only retag the final name after binary verification, so a broken build
+# can never land on a tag consumers track (2026-10-19 empty-shell incident).
+# The tag for each mode is appended in the branch below.
+
+if [[ "$NO_CACHE" == true ]]; then
+    BUILD_ARGS+=(--no-cache)
+    echo "Note: Building without cache"
+elif [[ "${GITHUB_ACTIONS:-}" == "true" && "${ACT:-}" != "true" ]]; then
+    CACHE_REF="ghcr.io/${GITHUB_REPOSITORY:-sebrinass/infer-images}:${CACHE_TAG}"
+    BUILD_ARGS+=(
+        --cache-from "type=registry,ref=${CACHE_REF}"
+        --cache-to "type=registry,ref=${CACHE_REF},mode=max"
+    )
+    echo "Note: Using registry cache (${CACHE_REF})"
+fi
+
+# In CI the target tag is a registry ref (e.g. ghcr.io/...). `--load` would
+# materialize the full ~16GB image in the local docker daemon ON TOP of the
+# buildx cache (~20GB), which exceeds the runner's disk. Push a STAGING tag
+# straight from the build cache, then prune, pull it back, VERIFY, and only
+# then retag it locally to the final name — the workflow's push step runs
+# AFTER this script, so the final ghcr tag is only ever updated by a verified
+# image. Local builds (no registry in the tag) keep using `--load`.
+if [[ "${DOCKER_IMAGE_TAG}" == */* ]]; then
+    STAGING_TAG="${DOCKER_IMAGE_TAG}-staging"
+    echo "Registry tag detected: pushing STAGING (${STAGING_TAG}) first; final tag only after verification"
+    DOCKER_BUILDKIT=1 docker buildx build --push -t "${STAGING_TAG}" "${BUILD_ARGS[@]}" "${SCRIPT_DIR}"
+    echo "Freeing build cache before pulling staging image for verification..."
+    docker buildx prune -af
+    docker pull "${STAGING_TAG}"
+    # Promote the verified-candidate to the final tag name locally. The actual
+    # `docker push` of the final tag happens in the workflow's push step.
+    docker tag "${STAGING_TAG}" "${DOCKER_IMAGE_TAG}"
+else
+    echo "Local tag detected: building with --load"
+    DOCKER_BUILDKIT=1 docker buildx build --load -t "${DOCKER_IMAGE_TAG}" "${BUILD_ARGS[@]}" "${SCRIPT_DIR}"
+fi
+
+echo ""
+echo "=========================================="
+echo "Verifying build artifacts..."
+echo "=========================================="
+echo ""
+
+# Only check binaries for components that were actually built in.
+EXPECTED_BINARIES=(llama-swap)
+[[ "$INCLUDE_LLAMA" == "1" ]] && EXPECTED_BINARIES+=(llama-server llama-cli)
+[[ "$INCLUDE_AUDIOCPP" == "1" ]] && EXPECTED_BINARIES+=(audiocpp_server audiocpp_cli)
+[[ "$INCLUDE_VLLM" == "1" ]] && EXPECTED_BINARIES+=(vllm)
+
+MISSING_BINARIES=()
+for binary in "${EXPECTED_BINARIES[@]}"; do
+    if ! docker run --rm --entrypoint which "${DOCKER_IMAGE_TAG}" "${binary}" >/dev/null 2>&1; then
+        MISSING_BINARIES+=("${binary}")
+    fi
+  done
+
+if [[ ${#MISSING_BINARIES[@]} -gt 0 ]]; then
+    echo "ERROR: Build succeeded but the following binaries are missing:"
+    for binary in "${MISSING_BINARIES[@]}"; do
+        echo "  - ${binary}"
+    done
+    echo ""
+    echo "Try running with --no-cache flag:"
+    echo "  ./build-image.sh --no-cache"
+    exit 1
+fi
+
+echo "All expected binaries verified: ${EXPECTED_BINARIES[*]}"
+
+# Static verification for the CUDA image (no GPU required).
+# Confirms nvcc (fp8 KV cache / FlashInfer JIT), vLLM version, the
+# kv-cache-dtype flag, vllm / flashinfer / gguf, and the SGLang version.
+echo ""
+echo "Running static verification (no GPU required)..."
+# NOTE: avoid the `vllm` CLI here.  vLLM 0.27 runs device-type inference
+# while building the CLI arg parser, which fails without a GPU ("Failed to
+# infer device type").  Use direct Python imports / source greps instead.
+# Component toggles are passed into the container so the per-component checks
+# below can be skipped for components that were not built.
+if ! docker run --rm --entrypoint bash \
+    -e INCLUDE_VLLM="$INCLUDE_VLLM" -e INCLUDE_VLLM_OMNI="$INCLUDE_VLLM_OMNI" -e INCLUDE_VLLM_GGUF="$INCLUDE_VLLM_GGUF" \
+    -e INCLUDE_SGLANG="$INCLUDE_SGLANG" -e INCLUDE_STRATA="$INCLUDE_STRATA" \
+    -e INCLUDE_FASTLLM="$INCLUDE_FASTLLM" \
+    "${DOCKER_IMAGE_TAG}" -c '
+    set -e
+    echo "--- nvcc ---"
+    nvcc --version | tail -1
+    if [ "$INCLUDE_VLLM" = "1" ]; then
+        echo "--- vllm version ---"
+        /opt/vllm-venv/bin/python -c "import vllm; print(vllm.__version__)"
+        echo "--- kv-cache-dtype flag (vllm) ---"
+        grep -rhoE -- "--kv-cache-dtype|kv_cache_dtype" /opt/vllm-venv/lib/python3.12/site-packages/vllm/ | sort -u
+        echo "--- pip list (vllm/flashinfer[/gguf]) ---"
+        if [ "$INCLUDE_VLLM_GGUF" = "1" ]; then
+            /opt/vllm-venv/bin/pip list 2>/dev/null | grep -i -E "vllm|flashinfer|gguf"
+        else
+            /opt/vllm-venv/bin/pip list 2>/dev/null | grep -i -E "vllm|flashinfer"
+            echo "vllm-gguf-plugin: not installed (INCLUDE_VLLM_GGUF=0)"
+        fi
+        echo "--- vllm-omni ---"
+        if [ "$INCLUDE_VLLM_OMNI" = "1" ]; then
+            /opt/vllm-venv/bin/python -c "import vllm_omni; print(vllm_omni.__version__)"
+        else
+            echo "vllm-omni: not installed (INCLUDE_VLLM_OMNI=0)"
+        fi
+        echo "--- flashinfer import ---"
+        /opt/vllm-venv/bin/python -c "import flashinfer; print(flashinfer.__version__)"
+    else
+        echo "vllm: disabled (INCLUDE_VLLM=0)"
+    fi
+    if [ "$INCLUDE_SGLANG" = "1" ]; then
+        echo "--- sglang version ---"
+        /opt/sglang-venv/bin/python -c "import sglang; print(sglang.__version__)"
+        echo "--- kv-cache-dtype flag (sglang) ---"
+        grep -rhoE -- "kv_cache_dtype|kv-cache-dtype" /opt/sglang-venv/lib/python3.12/site-packages/sglang/ | sort -u
+        echo "--- sglang pip list ---"
+        /opt/sglang-venv/bin/pip list 2>/dev/null | grep -i -E "sglang|torch|numba" | head -5
+    else
+        echo "sglang: disabled (INCLUDE_SGLANG=0)"
+    fi
+    echo "--- curand headers in /usr/local/cuda/include (flashinfer JIT) ---"
+    if [ "$INCLUDE_VLLM" = "1" ] || [ "$INCLUDE_SGLANG" = "1" ]; then
+        if ! ls /usr/local/cuda/include/curand.h >/dev/null 2>&1; then
+            echo "ERROR: curand.h missing (flashinfer sampling JIT will fail)" >&2
+            exit 1
+        fi
+        echo "curand.h present; count: $(ls /usr/local/cuda/include/curand*.h 2>/dev/null | wc -l)"
+    else
+        echo "no python engine enabled, curand check skipped"
+    fi
+    echo "--- vulkan ICDs (nvidia + intel) ---"
+    ls /usr/share/vulkan/icd.d/
+    ls /usr/share/vulkan/icd.d/ | grep -iE "nvidia|intel"
+    echo "--- AMD (radeon) must be absent ---"
+    if ls /usr/share/vulkan/icd.d/ | grep -iq "radeon\|amd"; then
+        echo "ERROR: AMD vulkan ICD present, expected removed" >&2
+        exit 1
+    fi
+    if ls /usr/lib/x86_64-linux-gnu/libvulkan_radeon.so >/dev/null 2>&1; then
+        echo "ERROR: libvulkan_radeon.so present, expected removed" >&2
+        exit 1
+    fi
+    echo "AMD vulkan driver removed OK"
+    echo "--- strata ---"
+    if [ "$INCLUDE_STRATA" = "1" ]; then
+        test -x /opt/strata/engine/strata && echo "strata engine present: $(/opt/strata/engine/strata --version 2>/dev/null | head -1 || echo ok)"
+        /opt/strata/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL" && echo "strata venv ok"
+    else
+        echo "strata: disabled (INCLUDE_STRATA=0)"
+    fi
+    echo "--- fastllm (isolated venv, CUDA 12 wheel) ---"
+    if [ "$INCLUDE_FASTLLM" = "1" ]; then
+        /opt/fastllm-venv/bin/pip show ftllm | head -2
+        test -x /opt/fastllm-venv/bin/ftllm
+        test -x /opt/fastllm-venv/bin/ftllm-launch
+        echo "ftllm binary + launcher present"
+        echo "nvidia cu12 lib dirs: $(ls -d /opt/fastllm-venv/lib/python3.12/site-packages/nvidia/*/lib 2>/dev/null | wc -l)"
+    else
+        echo "fastllm: disabled (INCLUDE_FASTLLM=0)"
+    fi
+    echo "--- libvulkan_intel.so linked deps ---"
+    if ldd /usr/lib/x86_64-linux-gnu/libvulkan_intel.so | grep -qi "not found"; then
+        echo "ERROR: libvulkan_intel.so has missing shared library deps" >&2
+        exit 1
+    fi
+    echo "Vulkan ICD check OK"
+'; then
+    echo "ERROR: Static verification failed for ${DOCKER_IMAGE_TAG}" >&2
+    exit 1
+fi
+echo "Static verification passed."
+
+echo ""
+echo "=========================================="
+if [[ "$BUILD_ROOTLESS" == "1" ]]; then
+echo "Building rootless image..."
+echo "=========================================="
+echo ""
+
+ROOTLESS_TAG="${DOCKER_IMAGE_TAG}-rootless"
+DOCKER_BUILDKIT=1 docker build -t "${ROOTLESS_TAG}" - <<EOF
+FROM ${DOCKER_IMAGE_TAG}
+USER root
+RUN groupadd --system --gid 10001 llama-swap && \\
+    useradd --system --uid 10001 --gid 10001 \\
+      --home /app --shell /sbin/nologin llama-swap && \\
+    chown -R 10001:10001 /etc/llama-swap /models /opt/vllm-venv /opt/sglang-venv /opt/strata
+USER 10001
+EOF
+
+echo "Rootless image built: ${ROOTLESS_TAG}"
+else
+echo "Rootless image: skipped (BUILD_ROOTLESS=0)"
+echo "  (it re-chowns ~20 GB of venv files, which Docker copies into a full"
+echo "   extra layer; opt in with --rootless or BUILD_ROOTLESS=1)"
+ROOTLESS_TAG=""
+fi
+
+echo ""
+echo "=========================================="
+echo "Build complete!"
+echo "=========================================="
+echo ""
+echo "Image tags:"
+echo "  ${DOCKER_IMAGE_TAG}"
+if [[ -n "${ROOTLESS_TAG}" ]]; then
+    echo "  ${ROOTLESS_TAG}"
+fi
+echo ""
+echo "Built with:"
+echo "  llama.cpp:            ${LLAMA_HASH}"
+echo "  audio.cpp:            ${AUDIOCPP_HASH}"
+echo "  llama-swap:           $(docker run --rm --entrypoint cat "${DOCKER_IMAGE_TAG}" /versions.txt | grep llama-swap | cut -d' ' -f2-)"
+echo ""
+echo "Run with:"
+echo "  docker run -it --rm --gpus all ${DOCKER_IMAGE_TAG}"
