@@ -63,10 +63,12 @@ ARG INCLUDE_VLLM_OMNI=0
 ARG INCLUDE_VLLM_GGUF=0
 ARG INCLUDE_SGLANG=0
 ARG INCLUDE_STRATA=1
-# Edge0 (edge0-strata engine + Python server) ships in the default set: it is
-# a separate path from /opt/strata (a fork with latent-MoE kernels), so the two
-# engines coexist and either can be dropped with --no-strata / --no-edge0.
-ARG INCLUDE_EDGE0=1
+# Edge0 (edge0-strata engine + Python server) is opt-in (default 0) as of
+# 2026-11-16: the 120B pack ran ~14 tok/s on 2x A2 and lost to the 27B model on
+# quality, so the engine is out of the default image. --edge0 brings it back.
+# It is a separate path from /opt/strata (a fork with latent-MoE kernels), so
+# the two engines coexist and either can be dropped with --no-strata / --no-edge0.
+ARG INCLUDE_EDGE0=0
 # SD is opt-in: default 0 keeps the historical image contents (no SD).
 ARG INCLUDE_SD=0
 
@@ -293,7 +295,7 @@ RUN if [ "$INCLUDE_STRATA" = "1" ]; then \
 # The 40-100 GB model packs are NOT in the image; they are mounted at runtime.
 FROM builder-base AS edge0-build
 ARG EDGE0_COMMIT_HASH=main
-ARG INCLUDE_EDGE0=1
+ARG INCLUDE_EDGE0=0
 ARG EDGE0_BUILD_VISION=1
 COPY install-edge0.sh /build/
 # INCLUDE_EDGE0=0 skips the apt deps + the whole build and only creates the
@@ -349,7 +351,7 @@ ARG INCLUDE_VLLM_OMNI=0
 ARG INCLUDE_VLLM_GGUF=0
 ARG INCLUDE_SGLANG=0
 ARG INCLUDE_STRATA=1
-ARG INCLUDE_EDGE0=1
+ARG INCLUDE_EDGE0=0
 ARG INCLUDE_SD=0
 ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_AUDIOCPP=${INCLUDE_AUDIOCPP} \
@@ -579,7 +581,7 @@ ARG INCLUDE_LLAMA=1
 ARG INCLUDE_AUDIOCPP=0
 ARG INCLUDE_LLAMA_SWAP=1
 ARG INCLUDE_VLLM=1
-ARG INCLUDE_EDGE0=1
+ARG INCLUDE_EDGE0=0
 RUN set -e; \
     if [ "$INCLUDE_LLAMA_SWAP" = "1" ]; then \
         command -v llama-swap >/dev/null || { echo "verify: llama-swap MISSING" >&2; exit 1; }; \

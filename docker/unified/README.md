@@ -12,8 +12,11 @@ unless you ask for it:
 - SGLang (isolated venv, opt-in: vLLM covers the same models) — `--sglang` / `--no-sglang` (~9.5 GB)
 - Strata (Qwen3.8-Flash-Next engine) — `--no-strata` (~1 GB)
 - Edge0 145B / 120B latent-MoE engine (`edge0-strata`, installed to
-  `/opt/edge0`, separate from `/opt/strata`) — `--no-edge0` (~1 GB). Model
-  packs are host mounts, not image content; launch with `/opt/edge0/run <pack>`.
+  `/opt/edge0`, separate from `/opt/strata`) — opt-in since 2026-11-16, `--edge0`
+  / `--no-edge0` (~1 GB). Model packs are host mounts, not image content;
+  launch with `/opt/edge0/run <pack>`. Dropped from the default set because the
+  120B pack ran ~14 tok/s on 2x A2 and lost to Swift-Qwen3.8-27B on five of six
+  published quality benchmarks.
 - the llama-swap binary itself (the image entrypoint) — `--no-llama-swap`
 - stable-diffusion.cpp (off by default, opt in with `--sd`)
 - the rootless variant, a second image that runs as an unprivileged user

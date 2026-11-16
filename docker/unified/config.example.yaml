@@ -28,7 +28,9 @@ models:
       --port ${PORT}
       --kv-cache-dtype fp8_e4m3
 
-  # Edge0 145B / 120B (latent-MoE, derived from Qwen3.8-Flash-Next). The packs
+  # Edge0 145B / 120B (latent-MoE, derived from Qwen3.8-Flash-Next). Needs the
+  # opt-in engine in the image (`./build-image.sh --edge0`) - it is off by
+  # default since 2026-11-16. The packs
   # stay on the host - each is 40-100 GB - and are mounted read-only, e.g.
   #   -v /mnt/user/appdata/edge0/Edge0-120B-q3k:/models/Edge0-120B-q3k:ro
   # The launcher fills the engine template's placeholders and starts the

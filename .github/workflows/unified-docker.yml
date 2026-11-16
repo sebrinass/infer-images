@@ -72,10 +72,10 @@ on:
         required: false
         default: true
       include_edge0:
-        description: "Include Edge0 (145B/120B latent-MoE engine)"
+        description: "Opt in to Edge0 (145B/120B latent-MoE engine) - off by default"
         type: boolean
         required: false
-        default: true
+        default: false
       include_sd:
         description: "Opt in to stable-diffusion.cpp (off by default)"
         type: boolean
@@ -205,7 +205,10 @@ jobs:
           INCLUDE_VLLM_OMNI: ${{ inputs.include_vllm_omni == true && '1' || '0' }}
           INCLUDE_VLLM_GGUF: ${{ inputs.include_vllm_gguf == true && '1' || '0' }}
           INCLUDE_STRATA: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_strata == true) && '1' || '0' }}
-          INCLUDE_EDGE0: ${{ (github.event_name != 'workflow_dispatch' || inputs.include_edge0 == true) && '1' || '0' }}
+          # Edge0 is opt-in as of 2026-11-16 (the 120B pack lost to the 27B
+          # model on quality at ~14 tok/s): only an explicit `true` on a manual
+          # run enables it, push/schedule builds leave it out.
+          INCLUDE_EDGE0: ${{ inputs.include_edge0 == true && '1' || '0' }}
           # SGLang is opt-in (vLLM covers the same models): only an explicit
           # `true` on a manual run enables it, push/schedule builds leave it out.
           INCLUDE_SGLANG: ${{ inputs.include_sglang == true && '1' || '0' }}

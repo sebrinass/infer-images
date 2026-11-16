@@ -37,8 +37,10 @@ INCLUDE_VLLM_GGUF="${INCLUDE_VLLM_GGUF:-0}"
 INCLUDE_SGLANG="${INCLUDE_SGLANG:-0}"
 INCLUDE_STRATA="${INCLUDE_STRATA:-1}"
 # Edge0 (edge0-strata, the latent-MoE fork used by the 145B / 120B packs).
-# Separate install path from Strata; both ship by default, either can go.
-INCLUDE_EDGE0="${INCLUDE_EDGE0:-1}"
+# Opt-in (default off) as of 2026-11-16: the 120B pack measured ~14 tok/s on
+# 2x A2 and lost to Swift-Qwen3.8-27B on five of six quality benchmarks, so the
+# engine is no longer part of the default image. Enable with --edge0.
+INCLUDE_EDGE0="${INCLUDE_EDGE0:-0}"
 # SD is opt-in (default off): nothing is built unless explicitly requested.
 INCLUDE_SD="${INCLUDE_SD:-0}"
 # The rootless variant (container runs as an unprivileged user) is a separate
@@ -118,8 +120,8 @@ for arg in "$@"; do
             echo "  --sglang         Opt IN to SGLang (~9.5 GB venv; off by default, vLLM covers the same models)"
             echo "  --no-sglang      Skip SGLang (already the default)"
             echo "  --no-strata      Skip Strata engine + venv (~1 GB)"
-            echo "  --edge0          Opt IN to Edge0 145B/120B engine (~1 GB; on by default)"
-            echo "  --no-edge0       Skip the Edge0 engine + venv (~1 GB)"
+            echo "  --edge0          Opt IN to the Edge0 145B/120B engine (~1 GB; off by default)"
+            echo "  --no-edge0       Skip the Edge0 engine + venv (~1 GB; already the default)"
             echo "  --vllm-omni      Opt IN to vLLM-Omni (version auto-aligned to the vLLM line)"
             echo "  --vllm-gguf      Opt IN to vllm-gguf-plugin (GGUF models via vLLM)"
             echo "  --sd             Opt IN to stable-diffusion.cpp (off by default)"
