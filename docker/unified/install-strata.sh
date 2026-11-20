@@ -50,6 +50,16 @@ python3 -m venv "$VENV"
     -r "${SRC}/terminal/requirements.txt" \
     -r "${SRC}/terminal/requirements-build.txt"
 
+# cmake is called by absolute path below, but it looks for its generator (`-G
+# Ninja`) on PATH - and pip's ninja lands in $VENV/bin, not in /usr/bin. Without
+# this, configure dies at once with "unable to find a build program
+# corresponding to Ninja" and then a misleading "CMAKE_CXX_COMPILER not set".
+# Strata's own tools/docker/Dockerfile.src carries the same line (PATH=/venv/bin).
+export PATH="$VENV/bin:$PATH"
+NINJA_BIN="$(command -v ninja || true)"
+[ -n "$NINJA_BIN" ] || { echo "ERROR: ninja missing from the venv - requirements-build.txt changed?"; exit 1; }
+echo "--- ninja: ${NINJA_BIN} ($("$NINJA_BIN" --version 2>/dev/null || echo '?'))"
+
 # --- engine: the same configure line as Strata's tools/docker/Dockerfile.src.
 #     "86-real;86-virtual": machine code for sm_86 plus PTX for later cards.
 #     STRATA_PORTABLE=ON keeps the AVX2 floor: the runner CPU has AVX-512, the
@@ -64,10 +74,17 @@ for a in $(echo "${STRATA_ARCH}" | tr ';,' '  '); do
     if [ "$a" -lt 75 ]; then sm60=ON; fi
 done
 
+#     -DGGML_CCACHE=OFF: builder-base puts /usr/lib/ccache first on PATH, and
+#     the vendored ggml defaults GGML_CCACHE=ON, which wraps every compile in a
+#     global RULE_LAUNCH_COMPILE - nvcc's fatbinary step then fails ("Could not
+#     open input file 'device.ptx'"). setup.py turns it off for its own builds;
+#     this one has to say it too.
 "$VENV/bin/cmake" -G Ninja -S engine -B build -DCMAKE_BUILD_TYPE=Release \
+    "-DCMAKE_MAKE_PROGRAM=${NINJA_BIN}" \
     -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
     -DSTRATA_EXPERIMENTAL_SM60=$sm60 \
     -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON -DSTRATA_Q6K_EXPERTS=ON \
+    -DGGML_CCACHE=OFF \
     "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual"
 # The build tree, not the configure line, decides whether strata_kq exists.
 . tools/packaging/engine_targets.sh
@@ -76,14 +93,18 @@ targets=$(engine_targets "$VENV/bin/cmake" build)
 
 if [ "$STRATA_VISION" = "1" ]; then
     "$VENV/bin/cmake" -G Ninja -S terminal/tools/vision -B build-vision \
-        -DCMAKE_BUILD_TYPE=Release -DSTRATA_VISION_CUDA=OFF -DSTRATA_PORTABLE=ON
+        "-DCMAKE_MAKE_PROGRAM=${NINJA_BIN}" \
+        -DCMAKE_BUILD_TYPE=Release -DSTRATA_VISION_CUDA=OFF -DSTRATA_PORTABLE=ON \
+        -DGGML_CCACHE=OFF
     "$VENV/bin/cmake" --build build-vision --target strata-vision -j "$(nproc)"
 fi
 
 if [ "$STRATA_SPLIT" = "1" ]; then
     "$VENV/bin/cmake" -G Ninja -S engine -B build-split \
+        "-DCMAKE_MAKE_PROGRAM=${NINJA_BIN}" \
         -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON \
         -DSTRATA_BUILD_TESTS=OFF -DSTRATA_BUILD_SPLIT=ON -DSTRATA_PORTABLE=ON \
+        -DGGML_CCACHE=OFF \
         "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual"
     "$VENV/bin/cmake" --build build-split --target strata-split -j "$(nproc)"
 fi
