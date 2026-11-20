@@ -622,8 +622,8 @@ if ! docker run --rm --entrypoint bash \
     echo "AMD vulkan driver removed OK"
     echo "--- strata ---"
     if [ "$INCLUDE_STRATA" = "1" ]; then
-        test -x /opt/strata/engine/strata && echo "strata engine present: $(/opt/strata/engine/strata --version 2>/dev/null | head -1 || echo ok)"
-        /opt/strata/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL" && echo "strata venv ok"
+        test -x /opt/strata/terminal/engine/strata && echo "strata engine present: $(/opt/strata/terminal/engine/strata --version 2>/dev/null | head -1 || echo ok)"
+        /opt/strata/terminal/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL" && echo "strata venv ok"
     else
         echo "strata: disabled (INCLUDE_STRATA=0)"
     fi

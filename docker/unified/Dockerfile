@@ -271,10 +271,10 @@ RUN if [ "$INCLUDE_SGLANG" = "1" ]; then \
 # the image delta is ~1 GB (vs ~30 GB for the SGLang venv). Compiled here like
 # llama.cpp; the runtime only executes the binary.
 FROM builder-base AS strata-build
-ARG STRATA_COMMIT_HASH=v0.1.43.1
+ARG STRATA_COMMIT_HASH=v0.2.17
 ARG INCLUDE_STRATA=1
 ARG STRATA_BUILD_VISION=1
-ARG STRATA_BUILD_SPLIT=1
+ARG STRATA_BUILD_SPLIT=0
 COPY install-strata.sh /build/
 # INCLUDE_STRATA=0 skips the apt deps + the whole build and only creates the
 # placeholder paths the runtime COPY needs.
@@ -286,7 +286,7 @@ RUN if [ "$INCLUDE_STRATA" = "1" ]; then \
                bash /build/install-strata.sh "${STRATA_COMMIT_HASH}"; \
     else \
         echo "INCLUDE_STRATA=0 -> skipping Strata build"; \
-        mkdir -p /install/strata/.venv/bin; \
+        mkdir -p /install/strata/terminal/.venv/bin; \
     fi
 
 # Build Edge0: edge0-strata, the latent-MoE fork of Strata used by the Edge0
@@ -366,7 +366,7 @@ ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_SD=${INCLUDE_SD}
 ARG LLAMA_COMMIT_HASH=unknown
 ARG AUDIOCPP_COMMIT_HASH=unknown
-ARG STRATA_COMMIT_HASH=v0.1.43.1
+ARG STRATA_COMMIT_HASH=v0.2.17
 ARG EDGE0_COMMIT_HASH=main
 ARG SD_COMMIT_HASH=master
 ARG RUN_UID=0
@@ -501,7 +501,7 @@ COPY --from=sd-build /install/bin/ /usr/local/bin/
 COPY --from=sd-build /install/lib/ /usr/local/lib/
 
 RUN chmod +x /opt/strata/first-setup.sh /opt/edge0/run && ldconfig
-ENV PATH="/opt/strata/.venv/bin:${PATH}"
+ENV PATH="/opt/strata/terminal/.venv/bin:/opt/strata/terminal/bin:${PATH}"
 
 # Bake the default config, then comment out the entries whose component was
 # left out of the build (a config referencing a binary the image does not
@@ -541,7 +541,7 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
     fi && \
     if [ "$INCLUDE_STRATA" = "1" ]; then \
         echo "strata: ${STRATA_COMMIT_HASH} (engine arch ${CMAKE_CUDA_ARCHITECTURES:-86})" >> /versions.txt; \
-        if [ -x /opt/strata/engine/strata-split-2 ]; then \
+        if [ -x /opt/strata/terminal/engine/strata-split ]; then \
             echo "strata-split: built (2 cards)" >> /versions.txt; \
         else \
             echo "strata-split: not built" >> /versions.txt; \

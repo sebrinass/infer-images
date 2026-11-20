@@ -20,7 +20,7 @@ MODEL="${1:-${STRATA_MODEL:-IQ2_XS}}"
 DATA_DIR="${STRATA_DATA_DIR:-/strata}"
 GPUS="${STRATA_GPUS:-all}"
 
-cd /opt/strata
+cd /opt/strata/terminal
 echo "=== Strata first setup: model=${MODEL} data=${DATA_DIR} gpus=${GPUS} source=${STRATA_SOURCE:-auto} ==="
 .venv/bin/python setup.py --no-start --yes \
     --model "${MODEL}" \
@@ -30,8 +30,8 @@ echo "=== Strata first setup: model=${MODEL} data=${DATA_DIR} gpus=${GPUS} sourc
 
 # The run config is written to /opt/strata (image layer, lost on image update);
 # copy it onto the bind mount so it survives. All paths inside are absolute
-# (exe -> /opt/strata/engine/strata, model -> ${DATA_DIR}/...), so it works
+# (exe -> /opt/strata/terminal/engine/strata, model -> ${DATA_DIR}/...), so it works
 # from anywhere. llama-swap's entry should point --config at this copy.
-cp -v /opt/strata/strata-*.json "${DATA_DIR}/"
+cp -v /opt/strata/terminal/strata-*.json "${DATA_DIR}/"
 echo "=== Done. Point llama-swap's entry at: --config ${DATA_DIR}/strata-*.json ==="
 ls -la "${DATA_DIR}/"
