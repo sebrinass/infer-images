@@ -21,13 +21,12 @@ unless you ask for it:
 - stable-diffusion.cpp (off by default, opt in with `--sd`)
 - Hindsight's hs-decide-1-flash decision model (off by default, opt in with
   `--hsdecide`). A 0.8B single-forward classifier, not a generator, so it needs
-  neither vLLM nor llama.cpp: the image carries a standalone CPU-only venv at
-  `/opt/hsdecide-venv` plus the vendor's `serving/` package (which adds
-  `POST /v1/systemone`) and a `hs-decide-serve` launcher. The 1.5 GB weights are
-  a host mount, not image content. CPU-only on purpose: the one consumer wired
-  today is Hindsight's background consolidation triage, where ~2.2 s per
-  decision costs nothing; swap the torch index in `install-hsdecide.sh` to
-  `.../whl/cu126` if a GPU path is ever wanted.
+  neither vLLM nor llama.cpp: the image vendors the `serving/` package (which
+  adds `POST /v1/systemone`) and installs it, `--no-deps`, into `/opt/vllm-venv`
+  so it runs on that venv's CUDA torch. Adds ~50 KB. The 1.5 GB weights are a
+  host mount, not image content. On an A2 a decision with its candidates
+  attached takes ~0.39 s, against ~31 s on the CPU cores; the file also ships a
+  `hs-decide-serve` launcher. Requires `INCLUDE_VLLM=1`.
 - the rootless variant, a second image that runs as an unprivileged user
   (off by default, opt in with `--rootless`; it re-chowns ~20 GB of venv
   files, which Docker copies into a full extra layer)

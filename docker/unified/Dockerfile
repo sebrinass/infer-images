@@ -337,11 +337,11 @@ RUN if [ "$INCLUDE_SD" = "1" ]; then \
         mkdir -p /install/bin /install/lib; \
     fi
 
-# Build hs-decide-1-flash: Hindsight's 0.8B decision model. It answers typed
+# Fetch hs-decide-1-flash: Hindsight's 0.8B decision model. It answers typed
 # questions (choice / score / noul) from a single forward pass and never emits
-# text, so there is no decode loop to schedule -> no vLLM, no llama.cpp. Own
-# venv, CPU-only torch (the triage it serves is a background job), so it stays
-# out of the GPU budget entirely. Plain ubuntu base: no CUDA toolchain wanted.
+# text, so there is no decode loop to schedule -> no vLLM, no llama.cpp. This
+# stage only vendors the serving package; the runtime stage installs it into the
+# vLLM venv, whose CUDA torch it reuses, so no torch is downloaded here at all.
 # The 1.5 GB weights stay out of the image and mount at runtime like the rest.
 FROM ubuntu:24.04 AS hsdecide-build
 ARG INCLUDE_HSDECIDE=0
@@ -353,7 +353,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
            bash /build/install-hsdecide.sh; \
        else \
            echo "INCLUDE_HSDECIDE=0 -> skipping hs-decide (empty placeholders)"; \
-           python3.12 -m venv /opt/hsdecide-venv; \
            mkdir -p /opt/hsdecide-src; \
            printf '#!/bin/sh\nexit 1\n' > /usr/local/bin/hs-decide-serve; \
            chmod 755 /usr/local/bin/hs-decide-serve; \
@@ -531,11 +530,21 @@ COPY edge0-run /opt/edge0/run
 COPY --from=sd-build /install/bin/ /usr/local/bin/
 COPY --from=sd-build /install/lib/ /usr/local/lib/
 
-# Copy the hs-decide venv + vendored serving package (empty placeholders and a
-# no-op launcher when INCLUDE_HSDECIDE=0, so these COPYs never fail).
-COPY --from=hsdecide-build /opt/hsdecide-venv /opt/hsdecide-venv
+# Copy the vendored hs-decide serving package (empty placeholder and a no-op
+# launcher when INCLUDE_HSDECIDE=0, so these COPYs never fail), then install it
+# into the vLLM venv. --no-deps is load-bearing: torch, transformers, fastapi and
+# pillow all already live there, and letting pip resolve would rewrite the vLLM
+# dependency tree this image is built around.
 COPY --from=hsdecide-build /opt/hsdecide-src /opt/hsdecide-src
 COPY --from=hsdecide-build /usr/local/bin/hs-decide-serve /usr/local/bin/hs-decide-serve
+RUN if [ "$INCLUDE_HSDECIDE" = "1" ]; then \
+        [ "$INCLUDE_VLLM" = "1" ] || { echo "INCLUDE_HSDECIDE=1 needs INCLUDE_VLLM=1: the serving package runs on that venv's CUDA torch" >&2; exit 1; }; \
+        /opt/vllm-venv/bin/python -m pip install --no-cache-dir --no-deps /opt/hsdecide-src/serving \
+        && /opt/vllm-venv/bin/python -c "import hindsight_decision" \
+        && echo "hs-decide: installed into /opt/vllm-venv"; \
+    else \
+        echo "INCLUDE_HSDECIDE=0 -> hs-decide not installed"; \
+    fi
 
 RUN chmod +x /opt/strata/first-setup.sh /opt/edge0/run && ldconfig
 ENV PATH="/opt/strata/terminal/.venv/bin:/opt/strata/terminal/bin:${PATH}"
@@ -597,7 +606,7 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
         echo "stable-diffusion: disabled (INCLUDE_SD=0)" >> /versions.txt; \
     fi && \
     if [ "$INCLUDE_HSDECIDE" = "1" ]; then \
-        echo "hs-decide: cpu-only, $(/opt/hsdecide-venv/bin/python -c 'import torch; print("torch " + torch.__version__)' 2>/dev/null || echo 'installed')" >> /versions.txt; \
+        echo "hs-decide: $(/opt/vllm-venv/bin/python -c 'import importlib.metadata as m; print(m.version("hindsight_decision"))' 2>/dev/null || echo 'installed') on vllm-venv torch $(/opt/vllm-venv/bin/python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo '?')" >> /versions.txt; \
     else \
         echo "hs-decide: disabled (INCLUDE_HSDECIDE=0)" >> /versions.txt; \
     fi && \
@@ -648,8 +657,9 @@ RUN set -e; \
     fi; \
     if [ "$INCLUDE_HSDECIDE" = "1" ]; then \
         test -x /usr/local/bin/hs-decide-serve || { echo "verify: hs-decide-serve MISSING" >&2; exit 1; }; \
-        /opt/hsdecide-venv/bin/python -c "import hindsight_decision, torch, transformers" \
-            || { echo "verify: hsdecide venv BROKEN" >&2; exit 1; }; \
-        echo "verify: hs-decide on $(/opt/hsdecide-venv/bin/python -c 'import torch; print("torch " + torch.__version__ + (", cuda " + torch.version.cuda if torch.version.cuda else ", cpu-only"))')"; \
+        test -x /opt/vllm-venv/bin/hindsight-decision-serve-transformers || { echo "verify: hs-decide launcher MISSING" >&2; exit 1; }; \
+        /opt/vllm-venv/bin/python -c "import hindsight_decision, torch, transformers" \
+            || { echo "verify: hs-decide install BROKEN" >&2; exit 1; }; \
+        echo "verify: hs-decide on torch $(/opt/vllm-venv/bin/python -c 'import torch; print(torch.__version__ + (", cuda " + torch.version.cuda if torch.version.cuda else ", cpu-only"))')"; \
     fi; \
     echo "verify: all required binaries present"
