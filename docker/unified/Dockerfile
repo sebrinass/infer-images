@@ -275,7 +275,10 @@ RUN if [ "$INCLUDE_SGLANG" = "1" ]; then \
 # the image delta is ~1 GB (vs ~30 GB for the SGLang venv). Compiled here like
 # llama.cpp; the runtime only executes the binary.
 FROM builder-base AS strata-build
-ARG STRATA_COMMIT_HASH=v0.2.17
+# Deliberately not pinned: build-image.sh resolves the newest Strata release tag
+# and passes the commit hash here. "latest" only covers a direct `docker build`,
+# where install-strata.sh resolves it to the current release itself.
+ARG STRATA_COMMIT_HASH=latest
 ARG INCLUDE_STRATA=1
 ARG STRATA_BUILD_VISION=1
 ARG STRATA_BUILD_SPLIT=0
@@ -394,7 +397,7 @@ ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_HSDECIDE=${INCLUDE_HSDECIDE}
 ARG LLAMA_COMMIT_HASH=unknown
 ARG AUDIOCPP_COMMIT_HASH=unknown
-ARG STRATA_COMMIT_HASH=v0.2.17
+ARG STRATA_COMMIT_HASH=unknown
 ARG EDGE0_COMMIT_HASH=main
 ARG SD_COMMIT_HASH=master
 ARG RUN_UID=0

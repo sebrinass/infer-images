@@ -16,7 +16,7 @@
 #        activates on a 2x A2 pair, so off by default: it only costs build time)
 set -e
 
-STRATA_REF="${1:-v0.2.17}"
+STRATA_REF="${1:-latest}"
 STRATA_REPO="https://github.com/Niko1221/Strata.git"
 STRATA_ARCH="${CMAKE_CUDA_ARCHITECTURES:-86}"
 STRATA_VISION="${STRATA_BUILD_VISION:-0}"
@@ -26,6 +26,16 @@ VENV="${SRC}/terminal/.venv"
 
 # exported: the staging heredoc below runs as a child process and reads these
 export STRATA_ARCH STRATA_VISION STRATA_SPLIT
+
+# Never pin Strata: an empty or "latest" ref is resolved to the newest release
+# tag here, so even a direct call (or a build that forgets to pass a hash) picks
+# up the current engine instead of a stale hardcoded one.
+if [ -z "${STRATA_REF}" ] || [ "${STRATA_REF}" = "latest" ] || [ "${STRATA_REF}" = "release" ]; then
+    STRATA_REF=$(curl -fsSL https://api.github.com/repos/Niko1221/Strata/releases/latest \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null) \
+        || { echo "WARN: could not resolve latest Strata release, falling back to main HEAD" >&2; STRATA_REF=main; }
+    echo "strata: resolved latest release -> ${STRATA_REF}"
+fi
 
 echo "=== Strata ${STRATA_REF} (arch ${STRATA_ARCH}, vision ${STRATA_VISION}, split ${STRATA_SPLIT}) ==="
 

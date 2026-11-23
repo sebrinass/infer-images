@@ -319,11 +319,9 @@ else
     echo "llama-swap: latest HEAD: ${LS_HASH}"
 fi
 
-# Resolve Strata ref. Default "latest": follow Strata's newest GitHub release so
-# the 3-day cron automatically picks up upstream fixes (the slow conversation
-# checkpoint replay #2316, the coarse-restore #2228, ...). Pin an exact tag via
-# STRATA_REF / the workflow's strata_ref input whenever a build must be
-# reproducible - Strata ships daily and a broken release can slip in.
+# Resolve Strata ref. Always "latest" unless a caller overrides it: follow
+# Strata's newest GitHub release so every build (manual, push, and the 3-day
+# cron) picks up the current engine without anyone remembering to bump a pin.
 STRATA_REPO="https://github.com/Niko1221/Strata.git"
 STRATA_REF="${STRATA_REF:-latest}"
 if [[ "$INCLUDE_STRATA" != "1" ]]; then
