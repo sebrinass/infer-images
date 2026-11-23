@@ -82,7 +82,7 @@ on:
         required: false
         default: false
       include_hsdecide:
-        description: "Opt in to Hindsight's hs-decide-1-flash decision model (CPU, off by default)"
+        description: "Opt in to Hindsight's hs-decide-1-flash decision model (shares the vLLM venv, off by default)"
         type: boolean
         required: false
         default: false
