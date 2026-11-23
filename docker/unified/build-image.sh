@@ -43,6 +43,8 @@ INCLUDE_STRATA="${INCLUDE_STRATA:-1}"
 INCLUDE_EDGE0="${INCLUDE_EDGE0:-0}"
 # SD is opt-in (default off): nothing is built unless explicitly requested.
 INCLUDE_SD="${INCLUDE_SD:-0}"
+# hs-decide is opt-in (default off): Hindsight's 0.8B decision model, CPU venv.
+INCLUDE_HSDECIDE="${INCLUDE_HSDECIDE:-0}"
 # The rootless variant (container runs as an unprivileged user) is a separate
 # image layered on top of the main one. It re-chowns ~20 GB of venv files,
 # which Docker turns into a full extra copy of them in a new layer. Nothing
@@ -102,8 +104,11 @@ for arg in "$@"; do
         --sd)
             INCLUDE_SD=1
             ;;
+        --hsdecide)
+            INCLUDE_HSDECIDE=1
+            ;;
         --help|-h)
-            echo "Usage: ./build-image.sh [--cuda] [--no-cache] [--no-llama] [--no-audiocpp] [--audiocpp] [--llamatts] [--no-llama-swap] [--no-vllm] [--sglang] [--no-sglang] [--no-strata] [--edge0] [--no-edge0] [--vllm-omni] [--vllm-gguf] [--sd] [--rootless]"
+            echo "Usage: ./build-image.sh [--cuda] [--no-cache] [--no-llama] [--no-audiocpp] [--audiocpp] [--llamatts] [--no-llama-swap] [--no-vllm] [--sglang] [--no-sglang] [--no-strata] [--edge0] [--no-edge0] [--vllm-omni] [--vllm-gguf] [--sd] [--hsdecide] [--rootless]"
             echo ""
             echo "Options:"
             echo "  --cuda      Build the unified CUDA image (default)"
@@ -442,7 +447,8 @@ for pair in "llama.cpp:${INCLUDE_LLAMA}" \
             "SGLang:${INCLUDE_SGLANG}" \
             "Strata:${INCLUDE_STRATA}" \
             "Edge0:${INCLUDE_EDGE0}" \
-            "stable-diffusion.cpp:${INCLUDE_SD}"; do
+            "stable-diffusion.cpp:${INCLUDE_SD}" \
+            "hs-decide:${INCLUDE_HSDECIDE}"; do
     name="${pair%%:*}"
     val="${pair##*:}"
     if [ "$val" = "1" ]; then
@@ -473,6 +479,7 @@ BUILD_ARGS=(
     --build-arg "INCLUDE_STRATA=${INCLUDE_STRATA}"
     --build-arg "INCLUDE_EDGE0=${INCLUDE_EDGE0}"
     --build-arg "INCLUDE_SD=${INCLUDE_SD}"
+    --build-arg "INCLUDE_HSDECIDE=${INCLUDE_HSDECIDE}"
     -f "${DOCKERFILE}"
 )
 # NOTE: no `-t` here on purpose. Registry (CI) builds push a STAGING tag first

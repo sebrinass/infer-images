@@ -81,6 +81,11 @@ on:
         type: boolean
         required: false
         default: false
+      include_hsdecide:
+        description: "Opt in to Hindsight's hs-decide-1-flash decision model (CPU, off by default)"
+        type: boolean
+        required: false
+        default: false
       include_llamatts:
         description: "Opt in to llama.cpp's llama-tts tool (off by default)"
         type: boolean
@@ -214,6 +219,8 @@ jobs:
           INCLUDE_SGLANG: ${{ inputs.include_sglang == true && '1' || '0' }}
           # SD is opt-in: only an explicit `true` enables it.
           INCLUDE_SD: ${{ inputs.include_sd == true && '1' || '0' }}
+          # hs-decide is opt-in the same way (CPU-only 0.8B classifier).
+          INCLUDE_HSDECIDE: ${{ inputs.include_hsdecide == true && '1' || '0' }}
           # audio.cpp, llama-tts and the rootless variant are opt-in the same
           # way: an explicit `true` on a manual run enables them, push/schedule
           # builds leave them out. (The opt-in form is safe here: an empty

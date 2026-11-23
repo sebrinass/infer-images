@@ -13,6 +13,7 @@
 #   Strata (Qwen3.8-Flash-Next engine)      -> INCLUDE_STRATA
 #   Edge0 (latent-MoE engine, 145B/120B)     -> INCLUDE_EDGE0
 #   stable-diffusion.cpp (opt-in, OFF)      -> INCLUDE_SD
+#   Hindsight hs-decide-1-flash (opt-in,OFF)-> INCLUDE_HSDECIDE
 #
 # The two vLLM add-ons default OFF (opt-in like SD): as of 2026-10-18 no model
 # in the live config uses either of them, and vllm-omni's stable releases lag
@@ -71,6 +72,9 @@ ARG INCLUDE_STRATA=1
 ARG INCLUDE_EDGE0=0
 # SD is opt-in: default 0 keeps the historical image contents (no SD).
 ARG INCLUDE_SD=0
+# hs-decide is opt-in: a 0.8B classifier for Hindsight's consolidation triage.
+# No vLLM, no llama.cpp - see install-hsdecide.sh for why.
+ARG INCLUDE_HSDECIDE=0
 
 # Builder base (CUDA devel + Vulkan SDK)
 # A single builder image that carries both the CUDA toolchain and the
@@ -330,6 +334,28 @@ RUN if [ "$INCLUDE_SD" = "1" ]; then \
         mkdir -p /install/bin /install/lib; \
     fi
 
+# Build hs-decide-1-flash: Hindsight's 0.8B decision model. It answers typed
+# questions (choice / score / noul) from a single forward pass and never emits
+# text, so there is no decode loop to schedule -> no vLLM, no llama.cpp. Own
+# venv, CPU-only torch (the triage it serves is a background job), so it stays
+# out of the GPU budget entirely. Plain ubuntu base: no CUDA toolchain wanted.
+# The 1.5 GB weights stay out of the image and mount at runtime like the rest.
+FROM ubuntu:24.04 AS hsdecide-build
+ARG INCLUDE_HSDECIDE=0
+COPY install-hsdecide.sh /build/
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv python3-pip ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && if [ "$INCLUDE_HSDECIDE" = "1" ]; then \
+           bash /build/install-hsdecide.sh; \
+       else \
+           echo "INCLUDE_HSDECIDE=0 -> skipping hs-decide (empty placeholders)"; \
+           python3.12 -m venv /opt/hsdecide-venv; \
+           mkdir -p /opt/hsdecide-src; \
+           printf '#!/bin/sh\nexit 1\n' > /usr/local/bin/hs-decide-serve; \
+           chmod 755 /usr/local/bin/hs-decide-serve; \
+       fi
+
 # Runtime
 
 FROM nvidia/cuda:13.3.0-runtime-ubuntu24.04 AS runtime
@@ -353,6 +379,7 @@ ARG INCLUDE_SGLANG=0
 ARG INCLUDE_STRATA=1
 ARG INCLUDE_EDGE0=0
 ARG INCLUDE_SD=0
+ARG INCLUDE_HSDECIDE=0
 ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_AUDIOCPP=${INCLUDE_AUDIOCPP} \
     INCLUDE_LLAMATTS=${INCLUDE_LLAMATTS} \
@@ -363,7 +390,8 @@ ENV INCLUDE_LLAMA=${INCLUDE_LLAMA} \
     INCLUDE_SGLANG=${INCLUDE_SGLANG} \
     INCLUDE_STRATA=${INCLUDE_STRATA} \
     INCLUDE_EDGE0=${INCLUDE_EDGE0} \
-    INCLUDE_SD=${INCLUDE_SD}
+    INCLUDE_SD=${INCLUDE_SD} \
+    INCLUDE_HSDECIDE=${INCLUDE_HSDECIDE}
 ARG LLAMA_COMMIT_HASH=unknown
 ARG AUDIOCPP_COMMIT_HASH=unknown
 ARG STRATA_COMMIT_HASH=v0.2.17
@@ -500,6 +528,12 @@ COPY edge0-run /opt/edge0/run
 COPY --from=sd-build /install/bin/ /usr/local/bin/
 COPY --from=sd-build /install/lib/ /usr/local/lib/
 
+# Copy the hs-decide venv + vendored serving package (empty placeholders and a
+# no-op launcher when INCLUDE_HSDECIDE=0, so these COPYs never fail).
+COPY --from=hsdecide-build /opt/hsdecide-venv /opt/hsdecide-venv
+COPY --from=hsdecide-build /opt/hsdecide-src /opt/hsdecide-src
+COPY --from=hsdecide-build /usr/local/bin/hs-decide-serve /usr/local/bin/hs-decide-serve
+
 RUN chmod +x /opt/strata/first-setup.sh /opt/edge0/run && ldconfig
 ENV PATH="/opt/strata/terminal/.venv/bin:/opt/strata/terminal/bin:${PATH}"
 
@@ -559,6 +593,11 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
     else \
         echo "stable-diffusion: disabled (INCLUDE_SD=0)" >> /versions.txt; \
     fi && \
+    if [ "$INCLUDE_HSDECIDE" = "1" ]; then \
+        echo "hs-decide: cpu-only, $(/opt/hsdecide-venv/bin/python -c 'import torch; print("torch " + torch.__version__)' 2>/dev/null || echo 'installed')" >> /versions.txt; \
+    else \
+        echo "hs-decide: disabled (INCLUDE_HSDECIDE=0)" >> /versions.txt; \
+    fi && \
     echo "build_timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /versions.txt
 
 RUN mkdir -p /models && chown ${RUN_UID}:${RUN_UID} /models && \
@@ -582,6 +621,7 @@ ARG INCLUDE_AUDIOCPP=0
 ARG INCLUDE_LLAMA_SWAP=1
 ARG INCLUDE_VLLM=1
 ARG INCLUDE_EDGE0=0
+ARG INCLUDE_HSDECIDE=0
 RUN set -e; \
     if [ "$INCLUDE_LLAMA_SWAP" = "1" ]; then \
         command -v llama-swap >/dev/null || { echo "verify: llama-swap MISSING" >&2; exit 1; }; \
@@ -602,5 +642,11 @@ RUN set -e; \
         test -x /opt/edge0/run || { echo "verify: edge0 launcher MISSING" >&2; exit 1; }; \
         /opt/edge0/edge0-strata/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL, psutil" \
             || { echo "verify: edge0 venv BROKEN" >&2; exit 1; }; \
+    fi; \
+    if [ "$INCLUDE_HSDECIDE" = "1" ]; then \
+        test -x /usr/local/bin/hs-decide-serve || { echo "verify: hs-decide-serve MISSING" >&2; exit 1; }; \
+        /opt/hsdecide-venv/bin/python -c "import hindsight_decision, torch, transformers" \
+            || { echo "verify: hsdecide venv BROKEN" >&2; exit 1; }; \
+        echo "verify: hs-decide on $(/opt/hsdecide-venv/bin/python -c 'import torch; print("torch " + torch.__version__ + (", cuda " + torch.version.cuda if torch.version.cuda else ", cpu-only"))')"; \
     fi; \
     echo "verify: all required binaries present"
