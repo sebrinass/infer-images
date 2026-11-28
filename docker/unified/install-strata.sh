@@ -196,6 +196,7 @@ meta = {
     "version": version,
     "archs": archs,
     "vision": vision,
+    "vision_archs": archs if vision != "none" else None,
     "src": source_hash(consts["ENGINE_SOURCES"]),
     "vision_src": source_hash(consts["VISION_SOURCES"]) if vision != "none" else None,
 }
