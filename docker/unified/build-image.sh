@@ -628,8 +628,8 @@ if ! docker run --rm --entrypoint bash \
     echo "--- strata ---"
     if [ "$INCLUDE_STRATA" = "1" ]; then
         test -x /opt/strata/terminal/engine/strata && echo "strata engine present: $(/opt/strata/terminal/engine/strata --version 2>/dev/null | head -1 || echo ok)"
-        main_exe=$(/opt/strata/terminal/.venv/bin/python -c "from strata_control import engine_component as e; print(e.expand(\"component:strata-engine\", {\"backend\": \"cuda\"}))")
-        ink_exe=$(/opt/strata/terminal/.venv/bin/python -c "from strata_control import engine_component as e; print(e.expand(\"component:strata-inkling\", {\"backend\": \"cuda\"}))")
+        main_exe=$(PYTHONPATH=/opt/strata/terminal /opt/strata/terminal/.venv/bin/python -c "from strata_control import engine_component as e; print(e.expand(\"component:strata-engine\", {\"backend\": \"cuda\"}))")
+        ink_exe=$(PYTHONPATH=/opt/strata/terminal /opt/strata/terminal/.venv/bin/python -c "from strata_control import engine_component as e; print(e.expand(\"component:strata-inkling\", {\"backend\": \"cuda\"}))")
         test -x "$main_exe" && test -x "$ink_exe"
         "$ink_exe" --version
         /opt/strata/terminal/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL" && echo "strata venv ok"

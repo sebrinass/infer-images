@@ -657,9 +657,9 @@ RUN set -e; \
     fi; \
     if [ "$INCLUDE_STRATA" = "1" ]; then \
         test -x /opt/strata/terminal/engine/strata || { echo "verify: strata engine MISSING" >&2; exit 1; }; \
-        main_exe=$(/opt/strata/terminal/.venv/bin/python -c 'from strata_control import engine_component as e; print(e.expand("component:strata-engine", {"backend": "cuda"}))') \
+        main_exe=$(PYTHONPATH=/opt/strata/terminal /opt/strata/terminal/.venv/bin/python -c 'from strata_control import engine_component as e; print(e.expand("component:strata-engine", {"backend": "cuda"}))') \
             || { echo "verify: strata component BROKEN" >&2; exit 1; }; \
-        ink_exe=$(/opt/strata/terminal/.venv/bin/python -c 'from strata_control import engine_component as e; print(e.expand("component:strata-inkling", {"backend": "cuda"}))') \
+        ink_exe=$(PYTHONPATH=/opt/strata/terminal /opt/strata/terminal/.venv/bin/python -c 'from strata_control import engine_component as e; print(e.expand("component:strata-inkling", {"backend": "cuda"}))') \
             || { echo "verify: strata-inkling component BROKEN" >&2; exit 1; }; \
         test -x "$main_exe" || { echo "verify: strata component entrypoint MISSING" >&2; exit 1; }; \
         test -x "$ink_exe" || { echo "verify: strata-inkling component entrypoint MISSING" >&2; exit 1; }; \
