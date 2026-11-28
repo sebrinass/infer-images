@@ -10,7 +10,9 @@ unless you ask for it:
 - audiocpp_server for TTS and ASR (opt-in) — `--audiocpp` / `--no-audiocpp`
 - vLLM for OpenAI-compatible high-throughput serving — `--no-vllm` (~4.7 GB)
 - SGLang (isolated venv, opt-in: vLLM covers the same models) — `--sglang` / `--no-sglang` (~9.5 GB)
-- Strata (Qwen3.8-Flash-Next engine) — `--no-strata` (~1 GB)
+- Strata (Qwen3.8-Flash-Next and Inkling-2-Mini engines) — `--no-strata`
+  (~1 GB plus the Inkling engine). Both engines are built from the same Strata
+  release; Inkling is installed as the `strata-inkling` shape component.
 - Edge0 145B / 120B latent-MoE engine (`edge0-strata`, installed to
   `/opt/edge0`, separate from `/opt/strata`) — opt-in since 2026-11-16, `--edge0`
   / `--no-edge0` (~1 GB). Model packs are host mounts, not image content;

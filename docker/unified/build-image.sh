@@ -124,7 +124,7 @@ for arg in "$@"; do
             echo "  --no-vllm        Skip vLLM + its venv (~4.7 GB)"
             echo "  --sglang         Opt IN to SGLang (~9.5 GB venv; off by default, vLLM covers the same models)"
             echo "  --no-sglang      Skip SGLang (already the default)"
-            echo "  --no-strata      Skip Strata engine + venv (~1 GB)"
+            echo "  --no-strata      Skip Strata engines + venv (Flash-Next and Inkling-2-Mini, ~1 GB plus Inkling)"
             echo "  --edge0          Opt IN to the Edge0 145B/120B engine (~1 GB; off by default)"
             echo "  --no-edge0       Skip the Edge0 engine + venv (~1 GB; already the default)"
             echo "  --vllm-omni      Opt IN to vLLM-Omni (version auto-aligned to the vLLM line)"
@@ -443,7 +443,7 @@ for pair in "llama.cpp:${INCLUDE_LLAMA}" \
             "vLLM-Omni:${INCLUDE_VLLM_OMNI}" \
             "vLLM-GGUF-plugin:${INCLUDE_VLLM_GGUF}" \
             "SGLang:${INCLUDE_SGLANG}" \
-            "Strata:${INCLUDE_STRATA}" \
+            "Strata (Flash-Next + Inkling-2-Mini):${INCLUDE_STRATA}" \
             "Edge0:${INCLUDE_EDGE0}" \
             "stable-diffusion.cpp:${INCLUDE_SD}" \
             "hs-decide:${INCLUDE_HSDECIDE}"; do
@@ -628,6 +628,10 @@ if ! docker run --rm --entrypoint bash \
     echo "--- strata ---"
     if [ "$INCLUDE_STRATA" = "1" ]; then
         test -x /opt/strata/terminal/engine/strata && echo "strata engine present: $(/opt/strata/terminal/engine/strata --version 2>/dev/null | head -1 || echo ok)"
+        main_exe=$(/opt/strata/terminal/.venv/bin/python -c "from strata_control import engine_component as e; print(e.expand(\"component:strata-engine\", {\"backend\": \"cuda\"}))")
+        ink_exe=$(/opt/strata/terminal/.venv/bin/python -c "from strata_control import engine_component as e; print(e.expand(\"component:strata-inkling\", {\"backend\": \"cuda\"}))")
+        test -x "$main_exe" && test -x "$ink_exe"
+        "$ink_exe" --version
         /opt/strata/terminal/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL" && echo "strata venv ok"
     else
         echo "strata: disabled (INCLUDE_STRATA=0)"

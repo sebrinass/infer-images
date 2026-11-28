@@ -14,6 +14,9 @@
 #        only - the first-setup here runs `--vision no`)
 #        STRATA_BUILD_SPLIT=1 also builds strata-split (2-4 cards; it never
 #        activates on a 2x A2 pair, so off by default: it only costs build time)
+#
+# Inkling-2-Mini's strata-inkling target is built with the main engine and staged
+# as its own component under components/shapes/inkling2/engine/.
 set -e
 
 STRATA_REF="${1:-latest}"
@@ -37,7 +40,7 @@ if [ -z "${STRATA_REF}" ] || [ "${STRATA_REF}" = "latest" ] || [ "${STRATA_REF}"
     echo "strata: resolved latest release -> ${STRATA_REF}"
 fi
 
-echo "=== Strata ${STRATA_REF} (arch ${STRATA_ARCH}, vision ${STRATA_VISION}, split ${STRATA_SPLIT}) ==="
+echo "=== Strata ${STRATA_REF} (arch ${STRATA_ARCH}, vision ${STRATA_VISION}, split ${STRATA_SPLIT}, inkling 1) ==="
 
 # --- source (init-based fetch so a cached /src/Strata dir doesn't break clone) ---
 mkdir -p "$SRC"
@@ -92,14 +95,14 @@ done
 "$VENV/bin/cmake" -G Ninja -S engine -B build -DCMAKE_BUILD_TYPE=Release \
     "-DCMAKE_MAKE_PROGRAM=${NINJA_BIN}" \
     -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
-    -DSTRATA_EXPERIMENTAL_SM60=$sm60 \
+    -DSTRATA_EXPERIMENTAL_SM60=$sm60 -DSTRATA_BUILD_INKLING=ON \
     -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON -DSTRATA_Q6K_EXPERTS=ON \
     -DGGML_CCACHE=OFF \
     "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual"
 # The build tree, not the configure line, decides whether strata_kq exists.
 . tools/packaging/engine_targets.sh
 targets=$(engine_targets "$VENV/bin/cmake" build)
-"$VENV/bin/cmake" --build build --target $targets -j "$(nproc)"
+"$VENV/bin/cmake" --build build --target $targets strata-inkling -j "$(nproc)"
 
 if [ "$STRATA_VISION" = "1" ]; then
     "$VENV/bin/cmake" -G Ninja -S terminal/tools/vision -B build-vision \
@@ -199,6 +202,75 @@ meta = {
 (eng / "BUILD.json").write_text(json.dumps(meta, indent=1))
 print(f"engine staged: {eng / 'strata'} (version {version}, archs {archs}, vision {vision}){split_note}")
 PYEOF
+
+# --- stage the main engine and Inkling as signed-feed-compatible component
+#     packages. The runtime resolves component:strata-engine and
+#     component:strata-inkling through STRATA_COMPONENTS_DIR. ---
+cd "$SRC"
+version=$("$VENV/bin/python" -c 'import json; print(json.load(open("terminal/engine/BUILD.json"))["version"])')
+cudafull=$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+cudamajor=${cudafull%%.*}
+if [ "$cudamajor" = "13" ]; then
+    mindriver=580.65
+else
+    mindriver=575.51
+fi
+arch_args=()
+for a in $(echo "${STRATA_ARCH}" | tr ';,' '  '); do arch_args+=(--arch "sm_${a}"); done
+arch_args+=(--arch "compute_${last}")
+build_id="infer-images-${STRATA_REF}-cuda${cudafull}"
+components=/install/strata/components
+stage_root=/tmp/strata-component-stage
+rm -rf "$components" "$stage_root"
+mkdir -p "$components/engine" "$components/shapes/inkling2/engine" "$stage_root"
+
+package_component() {
+    local name="$1" shape="$2" binary="$3" stage="$4"
+    mkdir -p "$stage"
+    cp "$binary" "$stage/$name"
+    cp "$SRC/terminal/engine/BUILD.json" "$stage/BUILD.json"
+    cp "$SRC/LICENSE" "$stage/LICENSE"
+    if [ "$name" = "strata" ]; then
+        if [ -f "$SRC/terminal/engine/libstrata_kq.so" ]; then
+            cp "$SRC/terminal/engine/libstrata_kq.so" "$stage/"
+        fi
+        if [ -f "$SRC/terminal/engine/strata-vision" ]; then
+            cp "$SRC/terminal/engine/strata-vision" "$stage/"
+        fi
+    fi
+    "$VENV/bin/python" "$SRC/tools/packaging/collect_libs.py" \
+        --binary "$stage/$name" --search /usr/local/cuda/lib64 --out "$stage" \
+        --also 'libcublasLt.so*'
+    local package_args=(
+        --src "$stage" --backend cuda --version "$version"
+        --platform linux-x86_64 --variant "cuda${cudamajor}"
+        --min-driver "nvidia=${mindriver}" --build-id "$build_id"
+        --include SYSTEM-LIBS.txt --include 'licenses/*'
+        "${arch_args[@]}"
+    )
+    if [ -n "$shape" ]; then
+        package_args+=(--shape "$shape")
+    fi
+    "$VENV/bin/python" "$SRC/tools/packaging/package_engine.py" "${package_args[@]}" --out "$5"
+}
+
+ink_bin=""
+if [ -f "$SRC/build/src/inkling2/strata-inkling" ]; then
+    ink_bin="$SRC/build/src/inkling2/strata-inkling"
+elif [ -f "$SRC/build/strata-inkling" ]; then
+    ink_bin="$SRC/build/strata-inkling"
+fi
+[ -n "$ink_bin" ] || { echo "ERROR: strata-inkling was not built" >&2; exit 1; }
+
+package_component strata "" "$SRC/build/strata" "$stage_root/main" "$components/engine"
+package_component strata-inkling inkling2 "$ink_bin" "$stage_root/inkling" "$components/shapes/inkling2/engine"
+
+for package_dir in "$components"/engine/*/ "$components"/shapes/inkling2/engine/*/; do
+    [ -d "$package_dir" ] || continue
+    "$VENV/bin/python" "$SRC/tools/packaging/package_engine.py" --verify "$package_dir"
+    "$VENV/bin/python" "$SRC/tools/packaging/binary_deps.py" "$package_dir"
+done
+rm -rf "$stage_root"
 
 # --- stage the install tree (build dirs are build-time only) ---
 cd "$SRC"

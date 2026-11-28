@@ -67,7 +67,7 @@ on:
         required: false
         default: false
       include_strata:
-        description: "Include Strata (Qwen3.8-Flash-Next engine)"
+        description: "Include Strata (Qwen3.8-Flash-Next + Inkling-2-Mini engines)"
         type: boolean
         required: false
         default: true
@@ -125,12 +125,24 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - id: set-matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUILD_CUDA: ${{ inputs.build_cuda }}
+          # Temporary pause after the manual Inkling build; resumes automatically.
+          SCHEDULE_PAUSE_UNTIL: "2026-12-01"
         run: |
-          backends=()
-          if [[ "${{ github.event_name }}" == "push" ]] || [[ "${{ github.event_name }}" == "schedule" ]] || [[ "${{ inputs.build_cuda }}" == "true" ]]; then
-            backends+=("cuda")
+          pause_until="${SCHEDULE_PAUSE_UNTIL}"
+          today=$(date -u +%F)
+          if [[ "$EVENT_NAME" == "schedule" && "$today" < "$pause_until" ]]; then
+            echo "Scheduled builds paused until ${pause_until}; skipping today's run."
+            matrix='[]'
+          else
+            backends=()
+            if [[ "$EVENT_NAME" == "push" ]] || [[ "$EVENT_NAME" == "schedule" ]] || [[ "$BUILD_CUDA" == "true" ]]; then
+              backends+=("cuda")
+            fi
+            matrix=$(printf '%s\n' "${backends[@]}" | jq -R . | jq -sc .)
           fi
-          matrix=$(printf '%s\n' "${backends[@]}" | jq -R . | jq -sc .)
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   build:

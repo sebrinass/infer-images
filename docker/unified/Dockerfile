@@ -10,7 +10,7 @@
 #   vLLM-Omni (opt-in, OFF)                 -> INCLUDE_VLLM_OMNI
 #   vLLM-GGUF-plugin (opt-in, OFF)          -> INCLUDE_VLLM_GGUF
 #   SGLang (isolated venv)                  -> INCLUDE_SGLANG
-#   Strata (Qwen3.8-Flash-Next engine)      -> INCLUDE_STRATA
+#   Strata (Qwen3.8-Flash-Next + Inkling-2-Mini engines) -> INCLUDE_STRATA
 #   Edge0 (latent-MoE engine, 145B/120B)     -> INCLUDE_EDGE0
 #   stable-diffusion.cpp (opt-in, OFF)      -> INCLUDE_SD
 #   Hindsight hs-decide-1-flash (opt-in,OFF)-> INCLUDE_HSDECIDE
@@ -270,7 +270,9 @@ RUN if [ "$INCLUDE_SGLANG" = "1" ]; then \
         echo "INCLUDE_SGLANG=0 -> skipping SGLang install (empty venv placeholder)"; \
     fi
 
-# Build Strata: native C++/CUDA engine (sm_86, Tesla A2 pair) + Python venv.
+# Build Strata: native C++/CUDA engines (sm_86, Tesla A2 pair) + Python venv.
+# The same checkout builds the Qwen engine and Inkling-2-Mini's strata-inkling
+# shape engine, then packages both as Strata components.
 # No torch, no CUDA pip wheels - the engine links this image's CUDA libs, so
 # the image delta is ~1 GB (vs ~30 GB for the SGLang venv). Compiled here like
 # llama.cpp; the runtime only executes the binary.
@@ -547,6 +549,7 @@ RUN if [ "$INCLUDE_HSDECIDE" = "1" ]; then \
     fi
 
 RUN chmod +x /opt/strata/first-setup.sh /opt/edge0/run && ldconfig
+ENV STRATA_COMPONENTS_DIR=/opt/strata/components
 ENV PATH="/opt/strata/terminal/.venv/bin:/opt/strata/terminal/bin:${PATH}"
 
 # Bake the default config, then comment out the entries whose component was
@@ -587,6 +590,7 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
     fi && \
     if [ "$INCLUDE_STRATA" = "1" ]; then \
         echo "strata: ${STRATA_COMMIT_HASH} (engine arch ${CMAKE_CUDA_ARCHITECTURES:-86})" >> /versions.txt; \
+        echo "strata-inkling: ${STRATA_COMMIT_HASH} (same Strata build)" >> /versions.txt; \
         if [ -x /opt/strata/terminal/engine/strata-split ]; then \
             echo "strata-split: built (2 cards)" >> /versions.txt; \
         else \
@@ -594,6 +598,7 @@ RUN echo "llama.cpp: ${LLAMA_COMMIT_HASH}" > /versions.txt && \
         fi; \
     else \
         echo "strata: disabled (INCLUDE_STRATA=0)" >> /versions.txt; \
+        echo "strata-inkling: disabled (INCLUDE_STRATA=0)" >> /versions.txt; \
     fi && \
     if [ "$INCLUDE_EDGE0" = "1" ]; then \
         echo "edge0: ${EDGE0_COMMIT_HASH} (engine arch ${CMAKE_CUDA_ARCHITECTURES:-86})" >> /versions.txt; \
@@ -632,6 +637,7 @@ ARG INCLUDE_LLAMA=1
 ARG INCLUDE_AUDIOCPP=0
 ARG INCLUDE_LLAMA_SWAP=1
 ARG INCLUDE_VLLM=1
+ARG INCLUDE_STRATA=1
 ARG INCLUDE_EDGE0=0
 ARG INCLUDE_HSDECIDE=0
 RUN set -e; \
@@ -648,6 +654,18 @@ RUN set -e; \
     fi; \
     if [ "$INCLUDE_VLLM" = "1" ]; then \
         command -v vllm >/dev/null || { echo "verify: vllm MISSING" >&2; exit 1; }; \
+    fi; \
+    if [ "$INCLUDE_STRATA" = "1" ]; then \
+        test -x /opt/strata/terminal/engine/strata || { echo "verify: strata engine MISSING" >&2; exit 1; }; \
+        main_exe=$(/opt/strata/terminal/.venv/bin/python -c 'from strata_control import engine_component as e; print(e.expand("component:strata-engine", {"backend": "cuda"}))') \
+            || { echo "verify: strata component BROKEN" >&2; exit 1; }; \
+        ink_exe=$(/opt/strata/terminal/.venv/bin/python -c 'from strata_control import engine_component as e; print(e.expand("component:strata-inkling", {"backend": "cuda"}))') \
+            || { echo "verify: strata-inkling component BROKEN" >&2; exit 1; }; \
+        test -x "$main_exe" || { echo "verify: strata component entrypoint MISSING" >&2; exit 1; }; \
+        test -x "$ink_exe" || { echo "verify: strata-inkling component entrypoint MISSING" >&2; exit 1; }; \
+        "$ink_exe" --version || { echo "verify: strata-inkling failed to start" >&2; exit 1; }; \
+        /opt/strata/terminal/.venv/bin/python -c "import numpy, jinja2, yaml, requests, tqdm, PIL" \
+            || { echo "verify: strata venv BROKEN" >&2; exit 1; }; \
     fi; \
     if [ "$INCLUDE_EDGE0" = "1" ]; then \
         test -x /opt/edge0/edge0-strata/build/strata || { echo "verify: edge0 engine MISSING" >&2; exit 1; }; \
